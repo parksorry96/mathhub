@@ -55,3 +55,13 @@
 - [x] FastAPI 메인 앱에 OCR Job 라우터 연결
 - [x] 유효성/예외 처리 반영 (SHA-256 패턴, UUID path validation, unique 충돌 409, 미존재 404)
 - [x] 별도 검증 DB에서 통합 테스트 수행 (생성/조회/404/422/409 시나리오 통과)
+
+### 8. OCR AI 분류(API 키 기반) 추가 — `11e354c`
+- [x] OpenClaw 워크플로우 대신 일반 AI API 키 기반 분류 전략으로 전환
+- [x] AI 분류 서비스 추가 (`apps/api/app/services/ai_classifier.py`)
+- [x] OCR Job AI 분류 API 추가 (`POST /ocr/jobs/{job_id}/ai-classify`)
+- [x] 분류 결과를 `ocr_pages.raw_payload` 및 `ocr_jobs.raw_response`에 JSONB로 저장
+- [x] `UUID/Datetime/Decimal` JSON 직렬화 보강으로 저장 오류 해결
+- [x] API 키 미설정/호출 실패 시 휴리스틱 분류 fallback 반영
+- [x] 의존성 추가 (`httpx`) 및 정적 점검 통과
+- [x] 통합 검증 수행 (job 생성 → page 적재 → ai-classify → DB 저장 확인)
