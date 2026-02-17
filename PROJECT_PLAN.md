@@ -18,6 +18,7 @@
 - [x] TanStack Query는 Next.js App Router에서 `QueryClientProvider`를 통해 서버 상태 캐싱/무효화 전략을 구성한다.
 - [x] MUI는 Next.js App Router에서 `AppRouterCacheProvider` 기반 SSR 스타일 수집 구성을 제공한다.
 - [x] FastAPI `BackgroundTasks`는 경량 작업에는 적합하지만, 무거운 작업은 Celery+Redis/RabbitMQ 같은 워커 큐가 권장된다.
+- [x] 패키지 매니저: **pnpm** (workspace 기반 모노레포 관리)
 
 ### Fact: 영향 범위 (초기 설계)
 - [x] 프론트엔드: Next.js(App Router) + React + TypeScript + React Query + MUI
