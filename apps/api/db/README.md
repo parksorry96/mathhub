@@ -14,7 +14,24 @@
 - `curriculum_versions`, `math_subjects`, `math_units`: 수능 체계 및 단원 트리
 - `difficulty_points`: 문제 배점(2,3,4)
 - `exam_blueprints`, `exam_blueprint_points`: 2027 수능 수학 운영 규칙(문항 수, 공통/선택 비율, 단답형 비율)
+- `problem_sources`: 출처 분류/메타데이터(기출문제/연계교재/기타 + 세부타입)
 - `problems`, `problem_choices`, `problem_unit_map`, `problem_assets`, `problem_revisions`: 문제은행 본체
+
+## 문제 출처 분류 권장안
+- 상위분류(`problem_sources.source_category`)
+  - `past_exam`: 기출문제
+  - `linked_textbook`: 연계교재
+  - `other`: 기타
+- 세부분류(`problem_sources.source_type`)
+  - `past_exam`: `csat`, `kice_mock`, `office_mock`
+  - `linked_textbook`: `ebs_linked`
+  - `other`: `private_mock`, `workbook`, `school_exam`, `teacher_made`, `other`
+- 문항 단위 식별(`problems`)
+  - `source_problem_no`: 숫자 문항 번호(예: 22번)
+  - `source_problem_label`: 비정형 문항 표기(예: 유형 2-3, 실전 1회 15번)
+- 연도 필드 권장 사용
+  - `academic_year`: 학년도(예: 2027학년도)
+  - `exam_year`/`exam_month`: 실제 시행 연월(예: 2026-11)
 
 ## 2027 기준 반영 내용
 - 수학 영역: 30문항, 100점, 100분
@@ -38,6 +55,16 @@ psql "$DATABASE_URL" -f apps/api/db/seed_csat_2027_math.sql
   - 위 보도자료 첨부문서(동일 페이지)
 - 교육부 보도자료(2025-06-02): 2028학년도부터 통합형(선택과목 폐지) 적용
   - https://www.moe.go.kr/boardCnts/viewRenew.do?boardID=294&boardSeq=103512&lev=0&m=020402&opType=N&page=1&s=moe&searchType=null&statusYN=W
+- 한국교육과정평가원 수능 사이트: 기출문제 메뉴에서 `대학수학능력시험`/`수능 모의평가` 분리
+  - https://www.suneung.re.kr/main.do?s=suneung
+  - https://www.suneung.re.kr/boardCnts/list.do?boardID=1500285&m=030502&s=suneung
+- EBSi: `2027 수능 대비 필수 연계교재` 안내
+  - https://www.ebsi.co.kr/
+- 서울특별시교육청: 전국연합학력평가 안내(시도교육청 학평 축)
+  - https://www.sen.go.kr/
+- 일반 문항검색 플랫폼 참고(분류/필터 패턴)
+  - https://www.mathflat.com/pricing
+  - https://thub.kumsung.co.kr/
 
 ## Assumption
 - `math_units`의 2단계 단원(중단원)은 수능 출제과목의 교과서 공통 대단원/중단원 관행을 기반으로 한 운영 taxonomy다.

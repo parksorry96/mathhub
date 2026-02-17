@@ -164,6 +164,129 @@ SET
     display_order = EXCLUDED.display_order,
     is_leaf = EXCLUDED.is_leaf;
 
+-- Source taxonomy examples:
+-- academic_year: 학년도(예: 2027학년도)
+-- exam_year/exam_month: 실제 시행 연월
+INSERT INTO problem_sources (
+    source_code,
+    source_category,
+    source_type,
+    title,
+    organization,
+    publisher,
+    academic_year,
+    exam_year,
+    exam_month,
+    exam_session,
+    grade_level,
+    series_name,
+    volume_label,
+    source_url,
+    metadata
+)
+VALUES
+    (
+        'PAST_CSAT_2026_MATH',
+        'past_exam',
+        'csat',
+        '2026학년도 대학수학능력시험 수학 영역',
+        '한국교육과정평가원',
+        NULL,
+        2026,
+        2025,
+        11,
+        '본시험',
+        3,
+        NULL,
+        NULL,
+        'https://www.suneung.re.kr/',
+        '{"example": true}'::jsonb
+    ),
+    (
+        'PAST_KICE_MOCK_2026_09_MATH',
+        'past_exam',
+        'kice_mock',
+        '2026학년도 9월 수능 모의평가 수학 영역',
+        '한국교육과정평가원',
+        NULL,
+        2026,
+        2025,
+        9,
+        '9월 모의평가',
+        3,
+        NULL,
+        NULL,
+        'https://www.suneung.re.kr/main.do?s=suneung',
+        '{"example": true}'::jsonb
+    ),
+    (
+        'LINK_EBS_2027_SAT_MATH',
+        'linked_textbook',
+        'ebs_linked',
+        '2027 수능특강 수학',
+        'EBSi',
+        'EBS한국교육방송공사',
+        2027,
+        2026,
+        NULL,
+        NULL,
+        NULL,
+        '수능특강',
+        '수학',
+        'https://www.ebsi.co.kr/',
+        '{"example": true, "linked_material": true}'::jsonb
+    ),
+    (
+        'OTHER_WORKBOOK_SAMPLE',
+        'other',
+        'workbook',
+        '개념원리 RPM 수학',
+        NULL,
+        '개념원리',
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        '개념원리 RPM',
+        '수학',
+        NULL,
+        '{"example": true}'::jsonb
+    ),
+    (
+        'OTHER_PRIVATE_MOCK_SAMPLE',
+        'other',
+        'private_mock',
+        '사설 모의고사 수학 1회',
+        NULL,
+        NULL,
+        2027,
+        2026,
+        8,
+        '1회',
+        3,
+        '사설 모의고사',
+        '수학',
+        NULL,
+        '{"example": true}'::jsonb
+    )
+ON CONFLICT (source_code) DO UPDATE
+SET
+    source_category = EXCLUDED.source_category,
+    source_type = EXCLUDED.source_type,
+    title = EXCLUDED.title,
+    organization = EXCLUDED.organization,
+    publisher = EXCLUDED.publisher,
+    academic_year = EXCLUDED.academic_year,
+    exam_year = EXCLUDED.exam_year,
+    exam_month = EXCLUDED.exam_month,
+    exam_session = EXCLUDED.exam_session,
+    grade_level = EXCLUDED.grade_level,
+    series_name = EXCLUDED.series_name,
+    volume_label = EXCLUDED.volume_label,
+    source_url = EXCLUDED.source_url,
+    metadata = EXCLUDED.metadata;
+
 WITH units AS (
     SELECT
         s.id AS subject_id,

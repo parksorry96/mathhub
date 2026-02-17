@@ -36,7 +36,25 @@ $$;
 
 DO $$
 BEGIN
-    CREATE TYPE problem_source_type AS ENUM ('csat', 'mock_exam', 'textbook', 'teacher_made', 'other');
+    CREATE TYPE problem_source_category AS ENUM ('past_exam', 'linked_textbook', 'other');
+EXCEPTION
+    WHEN duplicate_object THEN NULL;
+END
+$$;
+
+DO $$
+BEGIN
+    CREATE TYPE problem_source_type AS ENUM (
+        'csat',
+        'kice_mock',
+        'office_mock',
+        'ebs_linked',
+        'private_mock',
+        'workbook',
+        'school_exam',
+        'teacher_made',
+        'other'
+    );
 EXCEPTION
     WHEN duplicate_object THEN NULL;
 END
@@ -114,13 +132,27 @@ CREATE TABLE IF NOT EXISTS exam_blueprint_points (
 
 CREATE TABLE IF NOT EXISTS problem_sources (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source_code TEXT UNIQUE,
+    source_category problem_source_category NOT NULL,
     source_type problem_source_type NOT NULL,
     title TEXT NOT NULL,
+    organization TEXT,
     publisher TEXT,
-    exam_year SMALLINT,
+    academic_year SMALLINT CHECK (academic_year BETWEEN 2000 AND 2100),
+    exam_year SMALLINT CHECK (exam_year BETWEEN 2000 AND 2100),
     exam_month SMALLINT CHECK (exam_month BETWEEN 1 AND 12),
+    exam_session TEXT,
+    grade_level SMALLINT CHECK (grade_level BETWEEN 1 AND 3),
+    series_name TEXT,
+    volume_label TEXT,
+    source_url TEXT,
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (
+        (source_category = 'past_exam' AND source_type IN ('csat', 'kice_mock', 'office_mock'))
+        OR (source_category = 'linked_textbook' AND source_type = 'ebs_linked')
+        OR (source_category = 'other' AND source_type IN ('private_mock', 'workbook', 'school_exam', 'teacher_made', 'other'))
+    )
 );
 
 CREATE TABLE IF NOT EXISTS ocr_documents (
@@ -172,6 +204,8 @@ CREATE TABLE IF NOT EXISTS problems (
     response_type problem_response_type NOT NULL,
     point_value SMALLINT NOT NULL REFERENCES difficulty_points(point_value),
     answer_key TEXT NOT NULL,
+    source_problem_no SMALLINT CHECK (source_problem_no > 0),
+    source_problem_label TEXT,
     problem_text_raw TEXT,
     problem_text_latex TEXT,
     problem_text_final TEXT,
@@ -247,6 +281,16 @@ CREATE INDEX IF NOT EXISTS idx_problems_subject_point
 
 CREATE INDEX IF NOT EXISTS idx_problems_verified_created
     ON problems (is_verified, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_problems_source
+    ON problems (source_id, source_problem_no);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_problems_source_problem_no
+    ON problems (source_id, source_problem_no)
+    WHERE source_id IS NOT NULL AND source_problem_no IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_problem_sources_category_type
+    ON problem_sources (source_category, source_type, academic_year, exam_year);
 
 CREATE INDEX IF NOT EXISTS idx_problem_unit_map_unit
     ON problem_unit_map (unit_id);
