@@ -5,6 +5,10 @@
   "scripts": {
     "dev:web": "pnpm --filter @mathhub/web dev",
     "dev:api": "cd apps/api && uvicorn app.main:app --reload --port 8000",
+    "db:upgrade": "cd apps/api && .venv/bin/alembic upgrade head",
+    "db:downgrade": "cd apps/api && .venv/bin/alembic downgrade -1",
+    "db:current": "cd apps/api && .venv/bin/alembic current",
+    "db:seed:csat2027": "docker compose exec -T postgres psql -U mathhub -d mathhub -v ON_ERROR_STOP=1 < apps/api/db/seed_csat_2027_math.sql",
     "build:web": "pnpm --filter @mathhub/web build",
     "lint": "pnpm -r run lint",
     "typecheck": "pnpm -r run typecheck",

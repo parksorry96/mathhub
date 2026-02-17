@@ -48,6 +48,27 @@ psql "$DATABASE_URL" -f apps/api/db/schema.sql
 psql "$DATABASE_URL" -f apps/api/db/seed_csat_2027_math.sql
 ```
 
+## 마이그레이션(Alembic)
+```bash
+cd apps/api
+
+# 현재 리비전 확인
+.venv/bin/alembic current
+
+# 최신 스키마 반영
+.venv/bin/alembic upgrade head
+
+# 1단계 롤백
+.venv/bin/alembic downgrade -1
+
+# 새 리비전 생성
+.venv/bin/alembic revision -m "describe_change"
+```
+
+- 기본 연결 주소: `postgresql+psycopg://mathhub:mathhub_dev@localhost:5432/mathhub`
+- `DATABASE_URL` 환경변수를 주면 해당 주소를 우선 사용합니다.
+- baseline 리비전은 고정 스냅샷 파일(`apps/api/migrations/sql/d23823e2de6d_baseline_schema.sql`)을 실행합니다.
+
 ## 참고(공식 근거)
 - 교육부 보도자료(2024-08-16): 2027학년도 수능 일정/체제 공지
   - https://www.moe.go.kr/boardCnts/viewRenew.do?boardID=294&boardSeq=100526&lev=0&m=020402&opType=N&page=1&s=moe&searchType=null&statusYN=W
