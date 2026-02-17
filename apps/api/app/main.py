@@ -1,6 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.routers import ocr_jobs_router
+
 app = FastAPI(
     title="MathHub API",
     description="Math OCR → Problem DB → Workbook/Exam Platform",
@@ -14,6 +16,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(ocr_jobs_router)
 
 
 @app.get("/health")
