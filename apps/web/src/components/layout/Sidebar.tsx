@@ -34,15 +34,14 @@ export default function Sidebar() {
       component="nav"
       sx={{
         width: SIDEBAR_WIDTH,
-        minHeight: "100vh",
+        height: "100vh",
         backgroundColor: "#141414",
         borderRight: "1px solid rgba(231,227,227,0.06)",
         display: "flex",
         flexDirection: "column",
-        position: "fixed",
+        position: "sticky",
         top: 0,
-        left: 0,
-        zIndex: 1200,
+        flexShrink: 0,
       }}
     >
       {/* Logo */}

@@ -3,7 +3,6 @@
 import { Box, InputBase, IconButton, Avatar, Badge } from "@mui/material";
 import SearchRoundedIcon from "@mui/icons-material/SearchRounded";
 import NotificationsNoneRoundedIcon from "@mui/icons-material/NotificationsNoneRounded";
-import { SIDEBAR_WIDTH } from "./Sidebar";
 
 export default function TopBar() {
   return (
@@ -11,7 +10,6 @@ export default function TopBar() {
       component="header"
       sx={{
         height: 64,
-        ml: `${SIDEBAR_WIDTH}px`,
         px: 4,
         display: "flex",
         alignItems: "center",
