@@ -47,3 +47,11 @@
 - [x] 루트 실행 스크립트 추가 (`db:current`, `db:upgrade`, `db:downgrade`, `db:seed:csat2027`)
 - [x] DB README에 마이그레이션 실행 방법 문서화
 - [x] 라이브 DB(`mathhub`)를 Alembic `head`로 정렬하여 버전 테이블 반영
+
+### 7. OCR Job API 1차 구현 — `f4722e1`
+- [x] DB 연결 유틸 추가 (`app/config.py`, `app/db.py`)
+- [x] OCR Job 요청/응답 스키마 추가 (`app/schemas/ocr_jobs.py`)
+- [x] OCR Job 라우터 추가 (`POST /ocr/jobs`, `GET /ocr/jobs/{job_id}`)
+- [x] FastAPI 메인 앱에 OCR Job 라우터 연결
+- [x] 유효성/예외 처리 반영 (SHA-256 패턴, UUID path validation, unique 충돌 409, 미존재 404)
+- [x] 별도 검증 DB에서 통합 테스트 수행 (생성/조회/404/422/409 시나리오 통과)
