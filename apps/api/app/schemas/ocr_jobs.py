@@ -46,3 +46,43 @@ class OCRJobDetailResponse(BaseModel):
     started_at: datetime | None
     finished_at: datetime | None
     document: OCRDocumentSummary
+
+
+class OCRJobAIClassifyRequest(BaseModel):
+    api_key: str | None = None
+    api_base_url: str | None = None
+    model: str | None = None
+    max_pages: int = Field(default=20, ge=1, le=1000)
+    min_confidence: Decimal = Field(default=0, ge=0, le=100)
+
+
+class AICandidateClassification(BaseModel):
+    candidate_no: int
+    statement_text: str
+    subject_code: str | None
+    unit_code: str | None
+    point_value: int | None
+    source_category: str | None
+    source_type: str | None
+    validation_status: str
+    confidence: Decimal
+    reason: str | None
+    provider: str
+    model: str
+
+
+class AIPageClassification(BaseModel):
+    page_id: UUID
+    page_no: int
+    candidate_count: int
+    candidates: list[AICandidateClassification]
+
+
+class OCRJobAIClassifyResponse(BaseModel):
+    job_id: UUID
+    provider: str
+    model: str
+    pages_processed: int
+    candidates_processed: int
+    candidates_accepted: int
+    page_results: list[AIPageClassification]
