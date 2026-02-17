@@ -38,3 +38,12 @@
 - [x] 출처-문항번호 중복 방지 유니크 인덱스 및 분류 무결성 체크 제약 추가
 - [x] 출처 예시 시드 추가 (`seed_csat_2027_math.sql`)
 - [x] 일반 수학 문항검색 서비스/공식 사이트 리서치 근거를 README에 반영
+
+### 6. Alembic 마이그레이션 체계 도입 — `7f9ae1c`
+- [x] API 의존성에 DB 마이그레이션 패키지 추가 (`alembic`, `sqlalchemy`, `psycopg[binary]`)
+- [x] Alembic 초기 설정 파일 추가 (`apps/api/alembic.ini`, `apps/api/migrations/*`)
+- [x] baseline 리비전 추가 (`d23823e2de6d`) 및 고정 스키마 스냅샷 도입
+- [x] baseline `upgrade/downgrade` 경로 구현 (테이블/타입 생성 및 롤백)
+- [x] 루트 실행 스크립트 추가 (`db:current`, `db:upgrade`, `db:downgrade`, `db:seed:csat2027`)
+- [x] DB README에 마이그레이션 실행 방법 문서화
+- [x] 라이브 DB(`mathhub`)를 Alembic `head`로 정렬하여 버전 테이블 반영
