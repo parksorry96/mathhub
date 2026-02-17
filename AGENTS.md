@@ -184,3 +184,19 @@ When performing any work, follow this sequence (**all agents**):
 - In GitHub-connected projects (as defined in `## 0`), if `git add`/`git commit`/`git push` cannot be completed, document exact blocker, attempted commands, and required input/permission.
 
 ---
+
+## 10. Task History Tracking (MANDATORY)
+
+After every completed task (commit/push), agents **must** append the work to `TASK.md` in the project root:
+
+1. Add a new numbered subsection under the current Phase.
+2. Include the **commit hash** in the heading.
+3. List all completed items as `- [x]` checkboxes.
+
+```markdown
+### N. 작업 제목 — `커밋해시`
+- [x] 변경 사항 1
+- [x] 변경 사항 2
+```
+
+> ⛔ **Do NOT** declare a task complete without updating `TASK.md`.
