@@ -22,3 +22,10 @@
 ### 3. 사이드바 오버랩 수정 — `868de4a`
 - [x] Sidebar: `position: fixed` → `sticky`, `flexShrink: 0`
 - [x] AppShell: `flex` 레이아웃 복원, `marginLeft` 제거
+
+### 4. 2027 수능 수학 DB 스키마 설계 — `b6e9e0b`
+- [x] OCR(Mathpix) 파이프라인용 DB 스키마 추가 (`ocr_documents`, `ocr_jobs`, `ocr_pages`)
+- [x] 문제은행 스키마 추가 (`problems`, `problem_choices`, `problem_unit_map`, `problem_assets`, `problem_revisions`)
+- [x] 2027 수능 수학 기준값 반영 (수학Ⅰ/수학Ⅱ + 확률과 통계/미적분/기하, 2·3·4점, 30문항/100점/100분)
+- [x] 단원 트리 시드 추가 (대단원/중단원 2단계)
+- [x] DB 설계 문서 추가 (`apps/api/db/README.md`)
