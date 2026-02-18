@@ -184,3 +184,11 @@
 - [x] `POST /ocr/jobs/{job_id}/ai-classify/step`가 호출당 1문항이 아니라 다문항 배치 처리하도록 개선
 - [x] 프론트 classify loop에서 `max_candidates_per_call: 8`로 요청해 왕복 횟수 감소
 - [x] 검증 완료 (`ruff check`, `python -m compileall`, `pnpm --filter @mathhub/web lint`, `pnpm --filter @mathhub/web build`)
+
+### 26. 문항 시각 자산 추출/저장/미리보기 연동 — `23e2815`
+- [x] `ProblemAssetExtractor` 서비스 추가(PDF clip 렌더링 → PNG bytes → S3 업로드)
+- [x] `materialize-problems`에서 문항별 표/그래프/이미지 자산을 `problem_assets`에 upsert 저장
+- [x] `GET /ocr/jobs/{job_id}/questions`에 `external_problem_key`, `candidate_index`, `asset_previews` 확장
+- [x] `GET /problems` 응답에 자산 목록/미리보기 URL 포함
+- [x] 작업목록/문제목록/검수 화면에 시각 자산 썸네일 렌더링 추가
+- [x] 검증 완료 (`ruff check`, `python -m compileall`, `pnpm --filter @mathhub/web lint`, `pnpm --filter @mathhub/web build`)
