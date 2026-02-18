@@ -82,3 +82,14 @@
 - [x] sync 시 `ocr_pages` upsert 및 `ocr_jobs` 상태/진행률/에러/원본 응답 갱신
 - [x] `submit -> sync -> ai-classify -> materialize` 전체 체인 검증 통과
 - [x] `source_problem_no` 충돌 리스크 반영(`NULL` 기본 + `source_problem_label` 사용)
+
+### 11. 프론트 실API 연동 및 mock 제거 — `b1ea290`
+- [x] mock 데이터 파일 제거 (`apps/web/src/mocks/data.ts`)
+- [x] 웹 API 클라이언트 추가 (`apps/web/src/lib/api.ts`)
+- [x] 대시보드 페이지를 실제 API 데이터 기반으로 전환 (`/`, `GET /ocr/jobs`, `GET /problems`)
+- [x] 작업 목록 페이지를 실연동으로 전환하고 액션 버튼 연결 (`submit/sync/classify/materialize`)
+- [x] 업로드 페이지를 `POST /ocr/jobs` 기반 등록 흐름으로 전환 (SHA-256 계산 포함)
+- [x] 문제 라이브러리 페이지를 `GET /problems` 기반으로 전환
+- [x] 검수 페이지를 `GET /problems` + `PATCH /problems/{id}/review` 기반으로 전환
+- [x] 백엔드에 프론트용 목록/검수 API 추가 (`GET /ocr/jobs`, `GET /problems`, `PATCH /problems/{id}/review`)
+- [x] 정적 검증/빌드/통합 검증 완료 (web lint/build, api ruff/compile, end-to-end API 시나리오)
