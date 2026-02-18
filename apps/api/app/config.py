@@ -46,3 +46,27 @@ def get_ai_api_base_url() -> str:
 
 def get_ai_model() -> str:
     return os.getenv("AI_MODEL") or get_openai_model()
+
+
+def get_s3_bucket() -> str | None:
+    return os.getenv("S3_BUCKET")
+
+
+def get_s3_region() -> str:
+    return os.getenv("S3_REGION", "ap-northeast-2")
+
+
+def get_s3_access_key_id() -> str | None:
+    return os.getenv("S3_ACCESS_KEY_ID")
+
+
+def get_s3_secret_access_key() -> str | None:
+    return os.getenv("S3_SECRET_ACCESS_KEY")
+
+
+def get_s3_session_token() -> str | None:
+    return os.getenv("S3_SESSION_TOKEN")
+
+
+def get_s3_endpoint_url() -> str | None:
+    return os.getenv("S3_ENDPOINT_URL")

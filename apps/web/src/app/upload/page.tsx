@@ -16,7 +16,7 @@ import CloudUploadRoundedIcon from "@mui/icons-material/CloudUploadRounded";
 import InsertDriveFileRoundedIcon from "@mui/icons-material/InsertDriveFileRounded";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import CheckCircleRoundedIcon from "@mui/icons-material/CheckCircleRounded";
-import { createOcrJob } from "@/lib/api";
+import { createOcrJob, presignS3Upload, uploadFileToS3PresignedUrl } from "@/lib/api";
 
 interface UploadFile {
   id: string;
@@ -81,10 +81,25 @@ export default function UploadPage() {
 
         try {
           const hash = await sha256Hex(file);
-          updateFile(id, { progress: 60 });
+          updateFile(id, { progress: 30 });
+
+          const presigned = await presignS3Upload({
+            filename: file.name,
+            content_type: file.type || "application/pdf",
+            prefix: "ocr",
+            expires_in_sec: 900,
+          });
+          updateFile(id, { progress: 55 });
+
+          await uploadFileToS3PresignedUrl({
+            uploadUrl: presigned.upload_url,
+            file,
+            headers: presigned.upload_headers,
+          });
+          updateFile(id, { progress: 85 });
 
           const payload = {
-            storage_key: `upload://${Date.now()}-${encodeURIComponent(file.name)}`,
+            storage_key: presigned.storage_key,
             original_filename: file.name,
             mime_type: file.type || "application/pdf",
             file_size_bytes: file.size,
@@ -97,7 +112,9 @@ export default function UploadPage() {
             progress: 100,
             jobId: created.id,
           });
-          setNotice("업로드 메타데이터 등록이 완료되었습니다. 작업 목록에서 OCR 파이프라인을 실행하세요.");
+          setNotice(
+            "S3 업로드 및 작업 등록이 완료되었습니다. 작업 목록에서 Mathpix 제출/동기화를 실행하세요.",
+          );
         } catch (err) {
           updateFile(id, {
             status: "error",
@@ -154,7 +171,7 @@ export default function UploadPage() {
           PDF 업로드
         </Typography>
         <Typography variant="body2" sx={{ color: "#919497", mt: 0.5 }}>
-          실제 API(`POST /ocr/jobs`)에 업로드 메타데이터를 등록합니다
+          S3 presigned URL로 PDF 업로드 후 OCR 작업을 등록합니다
         </Typography>
       </Box>
 
@@ -210,7 +227,7 @@ export default function UploadPage() {
               파일 선택
             </Button>
             <Typography variant="caption" sx={{ color: "#52525B", display: "block", mt: 2 }}>
-              PDF 형식 · SHA-256 계산 후 API 등록
+              PDF 형식 · S3 업로드 + SHA-256 계산 + API 등록
             </Typography>
             <input
               ref={fileInputRef}

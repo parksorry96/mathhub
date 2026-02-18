@@ -6,6 +6,15 @@ from app.services.mathpix_client import (
     resolve_provider_job_id,
     submit_mathpix_pdf,
 )
+from app.services.s3_storage import (
+    build_object_key,
+    build_storage_key,
+    create_s3_client,
+    ensure_s3_bucket,
+    generate_presigned_get_url,
+    generate_presigned_put_url,
+    parse_storage_key,
+)
 
 __all__ = [
     "classify_candidate",
@@ -15,4 +24,11 @@ __all__ = [
     "resolve_provider_job_id",
     "map_mathpix_job_status",
     "extract_mathpix_pages",
+    "create_s3_client",
+    "ensure_s3_bucket",
+    "build_object_key",
+    "build_storage_key",
+    "parse_storage_key",
+    "generate_presigned_put_url",
+    "generate_presigned_get_url",
 ]

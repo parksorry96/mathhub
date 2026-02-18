@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import ocr_jobs_router, problems_router
+from app.routers import ocr_jobs_router, problems_router, storage_router
 
 app = FastAPI(
     title="MathHub API",
@@ -19,6 +19,7 @@ app.add_middleware(
 
 app.include_router(ocr_jobs_router)
 app.include_router(problems_router)
+app.include_router(storage_router)
 
 
 @app.get("/health")

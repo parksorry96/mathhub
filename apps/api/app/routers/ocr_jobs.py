@@ -42,6 +42,7 @@ from app.services.mathpix_client import (
     resolve_provider_job_id,
     submit_mathpix_pdf,
 )
+from app.services.s3_storage import create_s3_client, generate_presigned_get_url, parse_storage_key
 
 router = APIRouter(prefix="/ocr/jobs", tags=["ocr-jobs"])
 
@@ -85,6 +86,44 @@ def _resolve_mathpix_credentials(
             detail="mathpix credentials missing: provide app_id/app_key or set MATHPIX_APP_ID/MATHPIX_APP_KEY",
         )
     return resolved_app_id, resolved_app_key, resolved_base_url
+
+
+def _resolve_mathpix_file_url(*, file_url: str | None, storage_key: str) -> str:
+    candidate = (file_url or storage_key or "").strip()
+    if not candidate:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="file_url is required (or storage_key must be a valid URL/S3 key)",
+        )
+
+    if candidate.startswith("http://") or candidate.startswith("https://"):
+        return candidate
+
+    if candidate.startswith("s3://"):
+        try:
+            bucket, key = parse_storage_key(candidate)
+            s3_client = create_s3_client()
+            return generate_presigned_get_url(
+                client=s3_client,
+                bucket=bucket,
+                key=key,
+                expires_in=1800,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to generate S3 presigned GET URL: {exc}",
+            ) from exc
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="file_url must be http(s) URL or storage_key must be s3://bucket/key",
+    )
 
 
 @router.get("", response_model=OCRJobListResponse)
@@ -377,12 +416,10 @@ def submit_ocr_job_to_mathpix(
                 detail=f"provider_job_id already exists: {job['provider_job_id']}",
             )
 
-        file_url = payload.file_url or job["storage_key"]
-        if not isinstance(file_url, str) or not file_url.strip():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="file_url is required (or storage_key must contain URL)",
-            )
+        file_url = _resolve_mathpix_file_url(
+            file_url=payload.file_url,
+            storage_key=job["storage_key"],
+        )
 
         try:
             submit_result = submit_mathpix_pdf(

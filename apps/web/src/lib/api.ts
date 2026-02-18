@@ -93,6 +93,24 @@ export interface CreateOcrJobResponse {
   requested_at: string;
 }
 
+export interface S3PresignUploadRequest {
+  filename: string;
+  content_type: string;
+  prefix?: string;
+  expires_in_sec?: number;
+}
+
+export interface S3PresignUploadResponse {
+  bucket: string;
+  key: string;
+  storage_key: string;
+  upload_url: string;
+  download_url: string;
+  upload_method: "PUT";
+  upload_headers: Record<string, string>;
+  expires_in_sec: number;
+}
+
 interface RequestInitEx extends RequestInit {
   query?: Record<string, string | number | undefined | null>;
 }
@@ -152,6 +170,28 @@ export function createOcrJob(payload: CreateOcrJobPayload) {
     method: "POST",
     body: JSON.stringify(payload),
   });
+}
+
+export function presignS3Upload(payload: S3PresignUploadRequest) {
+  return requestJson<S3PresignUploadResponse>("/storage/s3/presign-upload", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function uploadFileToS3PresignedUrl(params: {
+  uploadUrl: string;
+  file: File;
+  headers?: Record<string, string>;
+}) {
+  const response = await fetch(params.uploadUrl, {
+    method: "PUT",
+    body: params.file,
+    headers: params.headers ?? {},
+  });
+  if (!response.ok) {
+    throw new Error(`S3 upload failed: ${response.status} ${response.statusText}`);
+  }
 }
 
 export function submitMathpixJob(jobId: string, payload?: Record<string, unknown>) {
