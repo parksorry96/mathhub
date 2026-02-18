@@ -74,3 +74,11 @@
 - [x] 단원코드가 유효한 경우 `problem_unit_map` primary 매핑 반영
 - [x] `needs_review` 메타데이터를 기본 부여해 후속 검수 흐름 유지
 - [x] 통합 검증 수행 (1차 insert, 2차 update, DB 반영 확인)
+
+### 10. Mathpix 제출/동기화 OCR 자동화 API 추가 — `7e496bb`
+- [x] `POST /ocr/jobs/{job_id}/mathpix/submit` 엔드포인트 추가
+- [x] `POST /ocr/jobs/{job_id}/mathpix/sync` 엔드포인트 추가
+- [x] Mathpix 클라이언트 서비스 분리 (`submit`, `status`, `job_id 추출`, `상태 매핑`, `페이지 추출`)
+- [x] sync 시 `ocr_pages` upsert 및 `ocr_jobs` 상태/진행률/에러/원본 응답 갱신
+- [x] `submit -> sync -> ai-classify -> materialize` 전체 체인 검증 통과
+- [x] `source_problem_no` 충돌 리스크 반영(`NULL` 기본 + `source_problem_label` 사용)
