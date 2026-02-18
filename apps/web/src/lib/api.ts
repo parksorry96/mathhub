@@ -93,6 +93,12 @@ export interface CreateOcrJobResponse {
   requested_at: string;
 }
 
+export interface DeleteOcrJobResponse {
+  job_id: string;
+  document_id: string;
+  source_deleted: boolean;
+}
+
 export interface S3PresignUploadRequest {
   filename: string;
   content_type: string;
@@ -169,6 +175,13 @@ export function createOcrJob(payload: CreateOcrJobPayload) {
   return requestJson<CreateOcrJobResponse>("/ocr/jobs", {
     method: "POST",
     body: JSON.stringify(payload),
+  });
+}
+
+export function deleteOcrJob(jobId: string, opts?: { delete_source?: boolean }) {
+  return requestJson<DeleteOcrJobResponse>(`/ocr/jobs/${jobId}`, {
+    method: "DELETE",
+    query: { delete_source: opts?.delete_source ?? true },
   });
 }
 

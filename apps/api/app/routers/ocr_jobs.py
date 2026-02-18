@@ -24,6 +24,7 @@ from app.schemas.ocr_jobs import (
     OCRJobAIClassifyResponse,
     OCRJobCreateRequest,
     OCRJobCreateResponse,
+    OCRJobDeleteResponse,
     OCRJobDetailResponse,
     OCRJobListItem,
     OCRJobListResponse,
@@ -42,7 +43,7 @@ from app.services.mathpix_client import (
     resolve_provider_job_id,
     submit_mathpix_pdf,
 )
-from app.services.s3_storage import create_s3_client, generate_presigned_get_url, parse_storage_key
+from app.services.s3_storage import create_s3_client, delete_object, generate_presigned_get_url, parse_storage_key
 
 router = APIRouter(prefix="/ocr/jobs", tags=["ocr-jobs"])
 
@@ -261,7 +262,12 @@ def create_ocr_job(payload: OCRJobCreateRequest) -> OCRJobCreateResponse:
                         sha256
                     )
                     VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (sha256) DO NOTHING
+                    ON CONFLICT (sha256) DO UPDATE
+                    SET
+                        storage_key = EXCLUDED.storage_key,
+                        original_filename = EXCLUDED.original_filename,
+                        mime_type = EXCLUDED.mime_type,
+                        file_size_bytes = EXCLUDED.file_size_bytes
                     RETURNING id
                     """,
                     (
@@ -318,6 +324,77 @@ def create_ocr_job(payload: OCRJobCreateRequest) -> OCRJobCreateResponse:
         )
 
     return OCRJobCreateResponse(**job)
+
+
+@router.delete("/{job_id}", response_model=OCRJobDeleteResponse)
+def delete_ocr_job(
+    job_id: UUID,
+    delete_source: bool = Query(default=True),
+) -> OCRJobDeleteResponse:
+    source_deleted = False
+    should_try_source_delete = False
+    storage_key = ""
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT j.id, j.document_id, d.storage_key
+                FROM ocr_jobs j
+                JOIN ocr_documents d ON d.id = j.document_id
+                WHERE j.id = %s
+                """,
+                (str(job_id),),
+            )
+            row = cur.fetchone()
+
+            if not row:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"OCR job not found: {job_id}",
+                )
+
+            document_id = row["document_id"]
+            storage_key = row["storage_key"] or ""
+
+            cur.execute(
+                "DELETE FROM ocr_jobs WHERE id = %s RETURNING id",
+                (str(job_id),),
+            )
+            deleted = cur.fetchone()
+            if not deleted:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"OCR job not found: {job_id}",
+                )
+
+            cur.execute(
+                "SELECT COUNT(*) AS cnt FROM ocr_jobs WHERE document_id = %s",
+                (str(document_id),),
+            )
+            remain_row = cur.fetchone()
+            remaining_jobs = int(remain_row["cnt"]) if remain_row else 0
+
+            if remaining_jobs == 0:
+                cur.execute("DELETE FROM ocr_documents WHERE id = %s", (str(document_id),))
+                should_try_source_delete = delete_source and storage_key.startswith("s3://")
+
+        conn.commit()
+
+    if should_try_source_delete:
+        try:
+            bucket, key = parse_storage_key(storage_key)
+            client = create_s3_client()
+            delete_object(client=client, bucket=bucket, key=key)
+            source_deleted = True
+        except Exception:
+            source_deleted = False
+
+    return OCRJobDeleteResponse(
+        job_id=job_id,
+        document_id=document_id,
+        source_deleted=source_deleted,
+    )
 
 
 @router.get("/{job_id}", response_model=OCRJobDetailResponse)

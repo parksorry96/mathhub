@@ -12,13 +12,7 @@ def submit_mathpix_pdf(
     base_url: str,
     callback_url: str | None = None,
 ) -> dict:
-    payload: dict = {
-        "url": file_url,
-        "conversion_formats": {
-            "text": True,
-            "latex_styled": True,
-        },
-    }
+    payload: dict = {"url": file_url}
     if callback_url:
         payload["callback"] = callback_url
 
@@ -33,7 +27,18 @@ def submit_mathpix_pdf(
             json=payload,
         )
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+
+        has_job_id = any(data.get(key) for key in ("pdf_id", "id", "job_id", "request_id"))
+        if not has_job_id and (data.get("error") or data.get("error_info")):
+            error_message = data.get("error")
+            if not error_message and isinstance(data.get("error_info"), dict):
+                error_message = data["error_info"].get("message") or data["error_info"].get("id")
+            if not error_message:
+                error_message = json.dumps(data.get("error_info"), ensure_ascii=False)
+            raise RuntimeError(f"Mathpix submit error: {error_message}")
+
+        return data
 
 
 def fetch_mathpix_pdf_status(

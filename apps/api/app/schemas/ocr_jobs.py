@@ -31,6 +31,12 @@ class OCRJobCreateResponse(BaseModel):
     requested_at: datetime
 
 
+class OCRJobDeleteResponse(BaseModel):
+    job_id: UUID
+    document_id: UUID
+    source_deleted: bool
+
+
 class OCRDocumentSummary(BaseModel):
     id: UUID
     storage_key: str

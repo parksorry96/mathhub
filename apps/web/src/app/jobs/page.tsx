@@ -25,9 +25,11 @@ import RefreshRoundedIcon from "@mui/icons-material/RefreshRounded";
 import CloudUploadRoundedIcon from "@mui/icons-material/CloudUploadRounded";
 import SmartToyRoundedIcon from "@mui/icons-material/SmartToyRounded";
 import PlaylistAddCheckRoundedIcon from "@mui/icons-material/PlaylistAddCheckRounded";
+import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
 import type { ApiJobStatus, OcrJobListItem } from "@/lib/api";
 import {
   classifyOcrJob,
+  deleteOcrJob,
   listOcrJobs,
   materializeProblems,
   submitMathpixJob,
@@ -115,7 +117,7 @@ export default function JobsPage() {
   }, [searchText, statusFilter, loadJobs]);
 
   const runAction = useCallback(
-    async (job: OcrJobListItem, action: "submit" | "sync" | "classify" | "materialize") => {
+    async (job: OcrJobListItem, action: "submit" | "sync" | "classify" | "materialize" | "delete") => {
       setNotice(null);
       setError(null);
       setRunningAction((prev) => ({ ...prev, [job.id]: action }));
@@ -129,7 +131,7 @@ export default function JobsPage() {
         } else if (action === "classify") {
           await classifyOcrJob(job.id, { max_pages: 50, min_confidence: 0 });
           setNotice(`${job.original_filename}: AI 분류 완료`);
-        } else {
+        } else if (action === "materialize") {
           await materializeProblems(job.id, {
             curriculum_code: "CSAT_2027",
             min_confidence: 0,
@@ -138,6 +140,13 @@ export default function JobsPage() {
             default_answer_key: "PENDING_REVIEW",
           });
           setNotice(`${job.original_filename}: 문제은행 적재 완료`);
+        } else {
+          const deleted = await deleteOcrJob(job.id, { delete_source: true });
+          setNotice(
+            deleted.source_deleted
+              ? `${job.original_filename}: 작업/원본 삭제 완료`
+              : `${job.original_filename}: 작업 삭제 완료 (원본 삭제는 건너뛰었거나 실패)`,
+          );
         }
         await loadJobs(searchText.trim(), statusFilter);
       } catch (err) {
@@ -362,6 +371,25 @@ export default function JobsPage() {
                                 onClick={() => void runAction(job, "materialize")}
                               >
                                 <PlaylistAddCheckRoundedIcon sx={{ fontSize: 16 }} />
+                              </IconButton>
+                            </span>
+                          </Tooltip>
+                          <Tooltip title={busy ? "실행 중" : "작업 삭제"}>
+                            <span>
+                              <IconButton
+                                size="small"
+                                sx={{ color: "#C45C5C" }}
+                                disabled={Boolean(busy)}
+                                onClick={() => {
+                                  const ok = window.confirm(
+                                    "이 작업을 삭제할까요?\n(참조가 없으면 원본 S3 파일도 함께 삭제 시도됩니다.)",
+                                  );
+                                  if (ok) {
+                                    void runAction(job, "delete");
+                                  }
+                                }}
+                              >
+                                <DeleteOutlineRoundedIcon sx={{ fontSize: 16 }} />
                               </IconButton>
                             </span>
                           </Tooltip>

@@ -105,3 +105,12 @@ def generate_presigned_get_url(
         ExpiresIn=expires_in,
         HttpMethod="GET",
     )
+
+
+def delete_object(
+    *,
+    client: BaseClient,
+    bucket: str,
+    key: str,
+) -> None:
+    client.delete_object(Bucket=bucket, Key=key)
