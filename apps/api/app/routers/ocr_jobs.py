@@ -6,7 +6,14 @@ from fastapi import APIRouter, HTTPException, status
 from psycopg.errors import UniqueViolation
 from psycopg.types.json import Json
 
-from app.config import get_ai_api_base_url, get_ai_api_key, get_ai_model
+from app.config import (
+    get_ai_api_base_url,
+    get_ai_api_key,
+    get_ai_model,
+    get_mathpix_app_id,
+    get_mathpix_app_key,
+    get_mathpix_base_url,
+)
 from app.db import get_db_connection
 from app.schemas.ocr_jobs import (
     AICandidateClassification,
@@ -20,8 +27,19 @@ from app.schemas.ocr_jobs import (
     OCRJobDetailResponse,
     OCRJobMaterializeProblemsRequest,
     OCRJobMaterializeProblemsResponse,
+    OCRJobMathpixSubmitRequest,
+    OCRJobMathpixSubmitResponse,
+    OCRJobMathpixSyncRequest,
+    OCRJobMathpixSyncResponse,
 )
 from app.services.ai_classifier import classify_candidate, extract_problem_candidates
+from app.services.mathpix_client import (
+    extract_mathpix_pages,
+    fetch_mathpix_pdf_status,
+    map_mathpix_job_status,
+    resolve_provider_job_id,
+    submit_mathpix_pdf,
+)
 
 router = APIRouter(prefix="/ocr/jobs", tags=["ocr-jobs"])
 
@@ -47,6 +65,24 @@ def _to_decimal(value) -> Decimal:
         return Decimal(str(value))
     except Exception:
         return Decimal("0")
+
+
+def _resolve_mathpix_credentials(
+    *,
+    app_id: str | None,
+    app_key: str | None,
+    base_url: str | None,
+) -> tuple[str, str, str]:
+    resolved_app_id = app_id or get_mathpix_app_id()
+    resolved_app_key = app_key or get_mathpix_app_key()
+    resolved_base_url = base_url or get_mathpix_base_url()
+
+    if not resolved_app_id or not resolved_app_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="mathpix credentials missing: provide app_id/app_key or set MATHPIX_APP_ID/MATHPIX_APP_KEY",
+        )
+    return resolved_app_id, resolved_app_key, resolved_base_url
 
 
 @router.post("", response_model=OCRJobCreateResponse, status_code=status.HTTP_201_CREATED)
@@ -185,6 +221,241 @@ def get_ocr_job(job_id: UUID) -> OCRJobDetailResponse:
         started_at=row["started_at"],
         finished_at=row["finished_at"],
         document=document,
+    )
+
+
+@router.post("/{job_id}/mathpix/submit", response_model=OCRJobMathpixSubmitResponse)
+def submit_ocr_job_to_mathpix(
+    job_id: UUID,
+    payload: OCRJobMathpixSubmitRequest,
+) -> OCRJobMathpixSubmitResponse:
+    app_id, app_key, base_url = _resolve_mathpix_credentials(
+        app_id=payload.app_id,
+        app_key=payload.app_key,
+        base_url=payload.base_url,
+    )
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT j.id, j.provider, j.provider_job_id, j.requested_at, j.started_at, d.storage_key
+                FROM ocr_jobs j
+                JOIN ocr_documents d ON d.id = j.document_id
+                WHERE j.id = %s
+                """,
+                (str(job_id),),
+            )
+            job = cur.fetchone()
+
+        if not job:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"OCR job not found: {job_id}",
+            )
+        if job["provider"] != "mathpix":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Only provider=mathpix jobs are supported, current provider={job['provider']}",
+            )
+        if job["provider_job_id"]:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"provider_job_id already exists: {job['provider_job_id']}",
+            )
+
+        file_url = payload.file_url or job["storage_key"]
+        if not isinstance(file_url, str) or not file_url.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="file_url is required (or storage_key must contain URL)",
+            )
+
+        try:
+            submit_result = submit_mathpix_pdf(
+                file_url=file_url,
+                app_id=app_id,
+                app_key=app_key,
+                base_url=base_url,
+                callback_url=payload.callback_url,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Mathpix submit request failed: {exc}",
+            ) from exc
+
+        provider_job_id = resolve_provider_job_id(submit_result)
+        if not provider_job_id:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Mathpix submit response missing job id (expected pdf_id/id/job_id/request_id)",
+            )
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE ocr_jobs
+                    SET
+                        provider_job_id = %s,
+                        status = 'processing',
+                        progress_pct = 5,
+                        started_at = COALESCE(started_at, NOW()),
+                        error_code = NULL,
+                        error_message = NULL,
+                        raw_response = COALESCE(raw_response, '{}'::jsonb)
+                            || jsonb_build_object('mathpix_submit', %s::jsonb)
+                    WHERE id = %s
+                    RETURNING id, provider_job_id, status::text AS status, progress_pct, requested_at, started_at
+                    """,
+                    (
+                        provider_job_id,
+                        Json(_json_ready(submit_result)),
+                        str(job_id),
+                    ),
+                )
+                updated = cur.fetchone()
+            conn.commit()
+        except UniqueViolation as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="provider_job_id already exists on another job",
+            ) from exc
+
+    return OCRJobMathpixSubmitResponse(
+        job_id=updated["id"],
+        provider_job_id=updated["provider_job_id"],
+        status=updated["status"],
+        progress_pct=updated["progress_pct"],
+        requested_at=updated["requested_at"],
+        started_at=updated["started_at"],
+    )
+
+
+@router.post("/{job_id}/mathpix/sync", response_model=OCRJobMathpixSyncResponse)
+def sync_ocr_job_with_mathpix(
+    job_id: UUID,
+    payload: OCRJobMathpixSyncRequest,
+) -> OCRJobMathpixSyncResponse:
+    app_id, app_key, base_url = _resolve_mathpix_credentials(
+        app_id=payload.app_id,
+        app_key=payload.app_key,
+        base_url=payload.base_url,
+    )
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, provider, provider_job_id
+                FROM ocr_jobs
+                WHERE id = %s
+                """,
+                (str(job_id),),
+            )
+            job = cur.fetchone()
+
+        if not job:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"OCR job not found: {job_id}",
+            )
+        if job["provider"] != "mathpix":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Only provider=mathpix jobs are supported, current provider={job['provider']}",
+            )
+        provider_job_id = job["provider_job_id"]
+        if not provider_job_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="provider_job_id is empty. submit the job to Mathpix first.",
+            )
+
+        try:
+            status_result = fetch_mathpix_pdf_status(
+                provider_job_id=provider_job_id,
+                app_id=app_id,
+                app_key=app_key,
+                base_url=base_url,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Mathpix status request failed: {exc}",
+            ) from exc
+
+        mapped_status, progress_pct, error_message = map_mathpix_job_status(status_result)
+        pages = extract_mathpix_pages(status_result)
+        pages_upserted = 0
+
+        with conn.cursor() as cur:
+            for page in pages:
+                cur.execute(
+                    """
+                    INSERT INTO ocr_pages (
+                        job_id,
+                        page_no,
+                        status,
+                        extracted_text,
+                        extracted_latex,
+                        raw_payload
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                    ON CONFLICT (job_id, page_no) DO UPDATE
+                    SET
+                        status = EXCLUDED.status,
+                        extracted_text = COALESCE(EXCLUDED.extracted_text, ocr_pages.extracted_text),
+                        extracted_latex = COALESCE(EXCLUDED.extracted_latex, ocr_pages.extracted_latex),
+                        raw_payload = COALESCE(ocr_pages.raw_payload, '{}'::jsonb) || EXCLUDED.raw_payload,
+                        updated_at = NOW()
+                    """,
+                    (
+                        str(job_id),
+                        page["page_no"],
+                        mapped_status,
+                        page["extracted_text"],
+                        page["extracted_latex"],
+                        Json(_json_ready(page["raw_payload"])),
+                    ),
+                )
+                pages_upserted += 1
+
+            cur.execute(
+                """
+                UPDATE ocr_jobs
+                SET
+                    status = %s,
+                    progress_pct = %s,
+                    error_code = CASE WHEN %s::text IS NULL THEN NULL ELSE 'MATHPIX_ERROR' END,
+                    error_message = %s::text,
+                    finished_at = CASE WHEN %s IN ('completed', 'failed', 'cancelled') THEN NOW() ELSE finished_at END,
+                    raw_response = COALESCE(raw_response, '{}'::jsonb)
+                        || jsonb_build_object('mathpix_status', %s::jsonb)
+                WHERE id = %s
+                RETURNING id, provider_job_id, status::text AS status, progress_pct
+                """,
+                (
+                    mapped_status,
+                    progress_pct,
+                    error_message,
+                    error_message,
+                    mapped_status,
+                    Json(_json_ready(status_result)),
+                    str(job_id),
+                ),
+            )
+            updated_job = cur.fetchone()
+        conn.commit()
+
+    return OCRJobMathpixSyncResponse(
+        job_id=updated_job["id"],
+        provider_job_id=updated_job["provider_job_id"],
+        status=updated_job["status"],
+        progress_pct=updated_job["progress_pct"],
+        pages_upserted=pages_upserted,
+        error_message=error_message,
     )
 
 
@@ -504,8 +775,10 @@ def materialize_ocr_job_problems(
                 if point_value not in (2, 3, 4):
                     point_value = payload.default_point_value
 
-                source_problem_no = candidate_no if 1 <= candidate_no <= 32767 else None
-                source_problem_label = str(candidate_no)
+                # OCR candidate numbers are page-local and can collide across pages,
+                # so keep source_problem_no NULL unless explicitly curated later.
+                source_problem_no = None
+                source_problem_label = f"P{page_no}-C{candidate_no}"
 
                 metadata = {
                     "needs_review": True,

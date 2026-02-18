@@ -88,6 +88,38 @@ class OCRJobAIClassifyResponse(BaseModel):
     page_results: list[AIPageClassification]
 
 
+class OCRJobMathpixSubmitRequest(BaseModel):
+    file_url: str | None = None
+    callback_url: str | None = None
+    app_id: str | None = None
+    app_key: str | None = None
+    base_url: str | None = None
+
+
+class OCRJobMathpixSubmitResponse(BaseModel):
+    job_id: UUID
+    provider_job_id: str
+    status: str
+    progress_pct: Decimal
+    requested_at: datetime
+    started_at: datetime | None
+
+
+class OCRJobMathpixSyncRequest(BaseModel):
+    app_id: str | None = None
+    app_key: str | None = None
+    base_url: str | None = None
+
+
+class OCRJobMathpixSyncResponse(BaseModel):
+    job_id: UUID
+    provider_job_id: str
+    status: str
+    progress_pct: Decimal
+    pages_upserted: int
+    error_message: str | None
+
+
 class OCRJobMaterializeProblemsRequest(BaseModel):
     curriculum_code: str = Field(default="CSAT_2027", min_length=1)
     source_id: UUID | None = None
