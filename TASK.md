@@ -131,3 +131,7 @@
 - [x] OCR 작업 삭제 API 추가 (`DELETE /ocr/jobs/{job_id}`) 및 고아 문서 정리/선택적 S3 삭제 시도
 - [x] 작업 목록 페이지에 삭제 버튼(확인창 포함) 추가 및 실 API 연동
 - [x] 회귀 검증: 신규 submit 성공, legacy 문서 S3 재바인딩, 삭제 API 동작 확인
+
+### 18. 작업목록 페이지 수(0/0) 표시 보정 — `79a37be`
+- [x] `ocr_pages`가 비어 있어도 `raw_response.mathpix_status.num_pages(_completed)`를 fallback으로 사용하도록 목록 집계 SQL 보완
+- [x] API 응답 검증: 완료된 Mathpix 작업에서 `total_pages/processed_pages`가 실제 페이지 수(예: 20/20)로 노출됨 확인
