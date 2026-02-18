@@ -246,9 +246,12 @@ export default function JobsPage() {
   const [previewError, setPreviewError] = useState<string | null>(null);
 
   const loadJobs = useCallback(
-    async (search: string, status: FilterStatus) => {
-      setLoading(true);
-      setError(null);
+    async (search: string, status: FilterStatus, options?: { silent?: boolean }) => {
+      const silent = options?.silent ?? false;
+      if (!silent) {
+        setLoading(true);
+        setError(null);
+      }
       try {
         const res = await listOcrJobs({
           limit: 100,
@@ -259,13 +262,21 @@ export default function JobsPage() {
         setJobs(res.items);
         setTotal(res.total);
       } catch (err) {
-        setError(err instanceof Error ? err.message : "작업 목록을 불러오지 못했습니다.");
+        if (!silent) {
+          setError(err instanceof Error ? err.message : "작업 목록을 불러오지 못했습니다.");
+        }
       } finally {
-        setLoading(false);
+        if (!silent) {
+          setLoading(false);
+        }
       }
     },
     [],
   );
+
+  const patchJob = useCallback((jobId: string, patch: Partial<OcrJobListItem>) => {
+    setJobs((prev) => prev.map((item) => (item.id === jobId ? { ...item, ...patch } : item)));
+  }, []);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -273,6 +284,23 @@ export default function JobsPage() {
     }, 250);
     return () => clearTimeout(timer);
   }, [searchText, statusFilter, loadJobs]);
+
+  const hasPendingServerUpdates = useMemo(() => {
+    if (Object.keys(runningAction).length > 0) {
+      return true;
+    }
+    return jobs.some((item) => item.status === "queued" || item.status === "uploading" || item.status === "processing");
+  }, [jobs, runningAction]);
+
+  useEffect(() => {
+    if (!hasPendingServerUpdates) {
+      return;
+    }
+    const timer = setInterval(() => {
+      void loadJobs(searchText.trim(), statusFilter, { silent: true });
+    }, 2500);
+    return () => clearInterval(timer);
+  }, [hasPendingServerUpdates, loadJobs, searchText, statusFilter]);
 
   const runClassifyLoop = useCallback(async (job: OcrJobListItem): Promise<OcrJobAiClassifyStepResponse> => {
     let latest: OcrJobAiClassifyStepResponse | null = null;
@@ -285,6 +313,14 @@ export default function JobsPage() {
         max_candidates_per_call: 8,
       });
       latest = step;
+      patchJob(job.id, {
+        ai_done: step.done,
+        ai_total_candidates: step.total_candidates,
+        ai_candidates_processed: step.candidates_processed,
+        ai_candidates_accepted: step.candidates_accepted,
+        ai_provider: step.provider,
+        ai_model: step.model,
+      });
       if (!step.done) {
         const at =
           step.current_page_no && step.current_candidate_no
@@ -302,7 +338,7 @@ export default function JobsPage() {
       throw new Error("AI 분류가 시간 내 완료되지 않았습니다. 다시 시도해주세요.");
     }
     return latest;
-  }, []);
+  }, [patchJob]);
 
   const runSyncUntilCompleted = useCallback(async (job: OcrJobListItem): Promise<OcrJobMathpixSyncResponse> => {
     const terminalStatuses: ApiJobStatus[] = ["completed", "failed", "cancelled"];
@@ -313,6 +349,11 @@ export default function JobsPage() {
     while (attempts < maxAttempts) {
       const step = await syncMathpixJob(job.id, {});
       latest = step;
+      patchJob(job.id, {
+        status: step.status,
+        progress_pct: step.progress_pct,
+        error_message: step.error_message,
+      });
       setNotice(`${job.original_filename}: OCR 동기화 ${toNumber(step.progress_pct).toFixed(0)}% (${step.status})`);
       if (terminalStatuses.includes(step.status)) {
         break;
@@ -334,7 +375,7 @@ export default function JobsPage() {
       throw new Error("Mathpix 동기화가 시간 내 완료되지 않았습니다. 다시 시도해주세요.");
     }
     return latest;
-  }, []);
+  }, [patchJob]);
 
   const runAction = useCallback(
     async (
@@ -347,8 +388,14 @@ export default function JobsPage() {
       try {
         if (action === "pipeline") {
           if (!job.provider_job_id) {
-            await submitMathpixJob(job.id, {});
-            setNotice(`${job.original_filename}: Mathpix 제출 완료`);
+            const submitResult = await submitMathpixJob(job.id, {});
+            patchJob(job.id, {
+              provider_job_id: submitResult.provider_job_id,
+              status: submitResult.status as ApiJobStatus,
+              progress_pct: submitResult.progress_pct,
+              started_at: submitResult.started_at ?? job.started_at,
+            });
+            setNotice(`${job.original_filename}: Mathpix 제출 완료, OCR 동기화 시작`);
           }
           const syncResult = await runSyncUntilCompleted(job);
           const classifyResult = await runClassifyLoop(job);
@@ -363,14 +410,23 @@ export default function JobsPage() {
             `${job.original_filename}: 자동실행 완료 (OCR ${toNumber(syncResult.progress_pct).toFixed(0)}%, AI ${classifyResult.candidates_processed}/${classifyResult.total_candidates}, 적재 +${materialized.inserted_count}/${materialized.updated_count})`,
           );
         } else if (action === "submit") {
-          await submitMathpixJob(job.id, {});
-          setNotice(`${job.original_filename}: Mathpix 제출 완료`);
+          const submitResult = await submitMathpixJob(job.id, {});
+          patchJob(job.id, {
+            provider_job_id: submitResult.provider_job_id,
+            status: submitResult.status as ApiJobStatus,
+            progress_pct: submitResult.progress_pct,
+            started_at: submitResult.started_at ?? job.started_at,
+          });
+          setNotice(`${job.original_filename}: Mathpix 제출 완료, 자동 동기화 시작`);
+          const syncResult = await runSyncUntilCompleted(job);
+          setNotice(`${job.original_filename}: OCR 동기화 완료 (${toNumber(syncResult.progress_pct).toFixed(0)}%)`);
         } else if (action === "sync") {
-          const syncResult = await syncMathpixJob(job.id, {});
+          const syncResult = await runSyncUntilCompleted(job);
           setNotice(
-            `${job.original_filename}: Mathpix 상태 동기화 (${syncResult.status}, ${toNumber(syncResult.progress_pct).toFixed(0)}%)`,
+            `${job.original_filename}: Mathpix 동기화 완료 (${syncResult.status}, ${toNumber(syncResult.progress_pct).toFixed(0)}%)`,
           );
         } else if (action === "classify") {
+          setNotice(`${job.original_filename}: AI 분류 시작`);
           const latest = await runClassifyLoop(job);
           setNotice(
             `${job.original_filename}: AI 분류 완료 (${latest.provider}, ${latest.candidates_processed}/${latest.total_candidates})`,
@@ -392,7 +448,6 @@ export default function JobsPage() {
               : `${job.original_filename}: 작업 삭제 완료 (원본 삭제는 건너뛰었거나 실패)`,
           );
         }
-        await loadJobs(searchText.trim(), statusFilter);
       } catch (err) {
         setError(err instanceof Error ? err.message : "작업 실행에 실패했습니다.");
       } finally {
@@ -401,9 +456,10 @@ export default function JobsPage() {
           delete next[job.id];
           return next;
         });
+        await loadJobs(searchText.trim(), statusFilter, { silent: true });
       }
     },
-    [loadJobs, runClassifyLoop, runSyncUntilCompleted, searchText, statusFilter],
+    [loadJobs, patchJob, runClassifyLoop, runSyncUntilCompleted, searchText, statusFilter],
   );
 
   const openPreview = useCallback(async (job: OcrJobListItem) => {
