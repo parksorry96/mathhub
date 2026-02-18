@@ -15,6 +15,7 @@ import CheckRoundedIcon from "@mui/icons-material/CheckRounded";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import NavigateNextRoundedIcon from "@mui/icons-material/NavigateNextRounded";
 import NavigateBeforeRoundedIcon from "@mui/icons-material/NavigateBeforeRounded";
+import { MathJax, MathJaxContext } from "better-react-mathjax";
 import { listProblems, reviewProblem, type ProblemListItem } from "@/lib/api";
 
 function difficultyLabel(pointValue: number) {
@@ -22,6 +23,13 @@ function difficultyLabel(pointValue: number) {
   if (pointValue === 3) return "3점";
   return "4점";
 }
+
+const mathJaxConfig = {
+  tex: {
+    inlineMath: [["\\(", "\\)"]],
+    displayMath: [["\\[", "\\]"]],
+  },
+};
 
 export default function ReviewPage() {
   const [loading, setLoading] = useState(true);
@@ -214,9 +222,11 @@ export default function ReviewPage() {
                   minHeight: 220,
                 }}
               >
-                <Typography variant="body1" sx={{ color: "#FFFFFF", fontSize: 16, lineHeight: 1.8 }}>
-                  {current.content || "(본문 없음)"}
-                </Typography>
+                <MathJaxContext config={mathJaxConfig}>
+                  <Box sx={{ color: "#FFFFFF", fontSize: 16, lineHeight: 1.8, whiteSpace: "pre-wrap" }}>
+                    <MathJax dynamic>{current.content || "(본문 없음)"}</MathJax>
+                  </Box>
+                </MathJaxContext>
               </Box>
 
               <Box sx={{ display: "flex", gap: 1.5, justifyContent: "flex-end" }}>
