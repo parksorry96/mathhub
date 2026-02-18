@@ -62,6 +62,23 @@ class OCRJobDetailResponse(BaseModel):
     document: OCRDocumentSummary
 
 
+class OCRPagePreviewItem(BaseModel):
+    id: UUID
+    page_no: int
+    status: str
+    extracted_text: str | None
+    extracted_latex: str | None
+    updated_at: datetime
+
+
+class OCRJobPagesResponse(BaseModel):
+    job_id: UUID
+    items: list[OCRPagePreviewItem]
+    total: int
+    limit: int
+    offset: int
+
+
 class OCRJobListItem(BaseModel):
     id: UUID
     document_id: UUID

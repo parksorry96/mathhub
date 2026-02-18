@@ -60,6 +60,25 @@ def fetch_mathpix_pdf_status(
         return response.json()
 
 
+def fetch_mathpix_pdf_lines(
+    *,
+    provider_job_id: str,
+    app_id: str,
+    app_key: str,
+    base_url: str,
+) -> dict:
+    with httpx.Client(timeout=60.0) as client:
+        response = client.get(
+            f"{base_url.rstrip('/')}/pdf/{provider_job_id}.lines.json",
+            headers={
+                "app_id": app_id,
+                "app_key": app_key,
+            },
+        )
+        response.raise_for_status()
+        return response.json()
+
+
 def resolve_provider_job_id(payload: dict) -> str | None:
     for key in ("pdf_id", "id", "job_id", "request_id"):
         value = payload.get(key)
@@ -171,6 +190,49 @@ def extract_mathpix_pages(payload: dict) -> list[dict]:
                 "raw_payload": {"text": text_value},
             }
         )
+    return pages
+
+
+def extract_mathpix_pages_from_lines(payload: dict) -> list[dict]:
+    pages: list[dict] = []
+    source_pages = payload.get("pages")
+    if not isinstance(source_pages, list):
+        return pages
+
+    for index, item in enumerate(source_pages):
+        if not isinstance(item, dict):
+            continue
+
+        page_no_raw = item.get("page") or item.get("page_no") or item.get("number") or (index + 1)
+        try:
+            page_no = int(page_no_raw)
+        except Exception:
+            page_no = index + 1
+
+        lines = item.get("lines")
+        text_lines: list[str] = []
+        if isinstance(lines, list):
+            for line in lines:
+                if not isinstance(line, dict):
+                    continue
+                text = line.get("text")
+                if isinstance(text, str):
+                    stripped = text.strip()
+                    if stripped:
+                        text_lines.append(stripped)
+
+        extracted_text = "\n".join(text_lines).strip() if text_lines else None
+        extracted_latex = _first_non_empty_str(item, ("latex_styled", "latex"))
+
+        pages.append(
+            {
+                "page_no": page_no,
+                "extracted_text": extracted_text or None,
+                "extracted_latex": extracted_latex,
+                "raw_payload": item,
+            }
+        )
+
     return pages
 
 

@@ -4,9 +4,14 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Box,
+  Button,
   Card,
   CardContent,
   Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   IconButton,
   InputAdornment,
   LinearProgress,
@@ -26,10 +31,12 @@ import CloudUploadRoundedIcon from "@mui/icons-material/CloudUploadRounded";
 import SmartToyRoundedIcon from "@mui/icons-material/SmartToyRounded";
 import PlaylistAddCheckRoundedIcon from "@mui/icons-material/PlaylistAddCheckRounded";
 import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
-import type { ApiJobStatus, OcrJobListItem } from "@/lib/api";
+import VisibilityRoundedIcon from "@mui/icons-material/VisibilityRounded";
+import type { ApiJobStatus, OcrJobListItem, OcrPagePreviewItem } from "@/lib/api";
 import {
   classifyOcrJob,
   deleteOcrJob,
+  listOcrJobPages,
   listOcrJobs,
   materializeProblems,
   submitMathpixJob,
@@ -86,6 +93,11 @@ export default function JobsPage() {
   const [searchText, setSearchText] = useState("");
   const [statusFilter, setStatusFilter] = useState<FilterStatus>("all");
   const [runningAction, setRunningAction] = useState<Record<string, string>>({});
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewTitle, setPreviewTitle] = useState("");
+  const [previewPages, setPreviewPages] = useState<OcrPagePreviewItem[]>([]);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
   const loadJobs = useCallback(
     async (search: string, status: FilterStatus) => {
@@ -161,6 +173,25 @@ export default function JobsPage() {
     },
     [loadJobs, searchText, statusFilter],
   );
+
+  const openPreview = useCallback(async (job: OcrJobListItem) => {
+    setPreviewOpen(true);
+    setPreviewTitle(job.original_filename);
+    setPreviewPages([]);
+    setPreviewError(null);
+    setPreviewLoading(true);
+    try {
+      const res = await listOcrJobPages(job.id, { limit: 50, offset: 0 });
+      setPreviewPages(res.items);
+      if (res.items.length === 0) {
+        setPreviewError("아직 추출된 OCR 페이지가 없습니다. Mathpix 동기화를 먼저 실행하세요.");
+      }
+    } catch (err) {
+      setPreviewError(err instanceof Error ? err.message : "OCR 페이지를 불러오지 못했습니다.");
+    } finally {
+      setPreviewLoading(false);
+    }
+  }, []);
 
   const visibleStatuses = useMemo(
     () => ["completed", "processing", "uploading", "queued", "failed", "cancelled"] as ApiJobStatus[],
@@ -326,6 +357,18 @@ export default function JobsPage() {
                       </TableCell>
                       <TableCell align="right">
                         <Box sx={{ display: "flex", justifyContent: "flex-end", gap: 0.5 }}>
+                          <Tooltip title={busy ? "실행 중" : "OCR 미리보기"}>
+                            <span>
+                              <IconButton
+                                size="small"
+                                sx={{ color: "#919497" }}
+                                disabled={Boolean(busy)}
+                                onClick={() => void openPreview(job)}
+                              >
+                                <VisibilityRoundedIcon sx={{ fontSize: 16 }} />
+                              </IconButton>
+                            </span>
+                          </Tooltip>
                           <Tooltip title={submitTooltip}>
                             <span>
                               <IconButton
@@ -412,6 +455,51 @@ export default function JobsPage() {
           </TableContainer>
         </CardContent>
       </Card>
+
+      <Dialog
+        open={previewOpen}
+        onClose={() => setPreviewOpen(false)}
+        fullWidth
+        maxWidth="md"
+        PaperProps={{ sx: { backgroundColor: "#18181A" } }}
+      >
+        <DialogTitle sx={{ color: "#FFFFFF", borderBottom: "1px solid rgba(231,227,227,0.08)" }}>
+          OCR 미리보기 · {previewTitle}
+        </DialogTitle>
+        <DialogContent sx={{ pt: 2 }}>
+          {previewLoading && <Typography sx={{ color: "#919497" }}>불러오는 중...</Typography>}
+          {!previewLoading && previewError && <Alert severity="warning">{previewError}</Alert>}
+          {!previewLoading &&
+            !previewError &&
+            previewPages.map((page) => (
+              <Box
+                key={page.id}
+                sx={{
+                  mb: 2,
+                  p: 2,
+                  border: "1px solid rgba(231,227,227,0.08)",
+                  borderRadius: 1.5,
+                  backgroundColor: "rgba(255,255,255,0.02)",
+                }}
+              >
+                <Typography variant="subtitle2" sx={{ color: "#E7E3E3", mb: 1 }}>
+                  페이지 {page.page_no}
+                </Typography>
+                <Typography
+                  variant="body2"
+                  sx={{ color: "#CFCFCF", whiteSpace: "pre-wrap", fontFamily: "monospace", fontSize: 12 }}
+                >
+                  {(page.extracted_text || page.extracted_latex || "").trim() || "(추출 텍스트 없음)"}
+                </Typography>
+              </Box>
+            ))}
+        </DialogContent>
+        <DialogActions sx={{ borderTop: "1px solid rgba(231,227,227,0.08)" }}>
+          <Button onClick={() => setPreviewOpen(false)} sx={{ color: "#E7E3E3" }}>
+            닫기
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }

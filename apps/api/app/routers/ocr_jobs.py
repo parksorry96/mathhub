@@ -34,10 +34,14 @@ from app.schemas.ocr_jobs import (
     OCRJobMathpixSubmitResponse,
     OCRJobMathpixSyncRequest,
     OCRJobMathpixSyncResponse,
+    OCRJobPagesResponse,
+    OCRPagePreviewItem,
 )
 from app.services.ai_classifier import classify_candidate, extract_problem_candidates
 from app.services.mathpix_client import (
     extract_mathpix_pages,
+    extract_mathpix_pages_from_lines,
+    fetch_mathpix_pdf_lines,
     fetch_mathpix_pdf_status,
     map_mathpix_job_status,
     resolve_provider_job_id,
@@ -472,6 +476,51 @@ def get_ocr_job(job_id: UUID) -> OCRJobDetailResponse:
     )
 
 
+@router.get("/{job_id}/pages", response_model=OCRJobPagesResponse)
+def list_ocr_job_pages(
+    job_id: UUID,
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+) -> OCRJobPagesResponse:
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM ocr_jobs WHERE id = %s", (str(job_id),))
+            job = cur.fetchone()
+            if not job:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"OCR job not found: {job_id}",
+                )
+
+            cur.execute(
+                """
+                SELECT id, page_no, status::text AS status, extracted_text, extracted_latex, updated_at
+                FROM ocr_pages
+                WHERE job_id = %s
+                ORDER BY page_no
+                LIMIT %s OFFSET %s
+                """,
+                (str(job_id), limit, offset),
+            )
+            rows = cur.fetchall()
+
+            cur.execute(
+                "SELECT COUNT(*) AS cnt FROM ocr_pages WHERE job_id = %s",
+                (str(job_id),),
+            )
+            total_row = cur.fetchone()
+            total = int(total_row["cnt"]) if total_row else 0
+
+    items = [OCRPagePreviewItem(**row) for row in rows]
+    return OCRJobPagesResponse(
+        job_id=job_id,
+        items=items,
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.post("/{job_id}/mathpix/submit", response_model=OCRJobMathpixSubmitResponse)
 def submit_ocr_job_to_mathpix(
     job_id: UUID,
@@ -634,6 +683,18 @@ def sync_ocr_job_with_mathpix(
 
         mapped_status, progress_pct, error_message = map_mathpix_job_status(status_result)
         pages = extract_mathpix_pages(status_result)
+        if not pages and mapped_status == "completed":
+            try:
+                lines_result = fetch_mathpix_pdf_lines(
+                    provider_job_id=provider_job_id,
+                    app_id=app_id,
+                    app_key=app_key,
+                    base_url=base_url,
+                )
+                pages = extract_mathpix_pages_from_lines(lines_result)
+            except Exception:
+                # Keep the original status path; page extraction can be retried with next sync.
+                pass
         pages_upserted = 0
 
         with conn.cursor() as cur:
@@ -739,7 +800,7 @@ def classify_ocr_job(job_id: UUID, payload: OCRJobAIClassifyRequest) -> OCRJobAI
         if not pages:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No OCR pages available for AI classification",
+                detail=f"No OCR pages available. Run /ocr/jobs/{job_id}/mathpix/sync and check /ocr/jobs/{job_id}/pages first.",
             )
 
         page_results: list[AIPageClassification] = []

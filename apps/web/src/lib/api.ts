@@ -35,6 +35,23 @@ export interface OcrJobListResponse {
   status_counts: Record<ApiJobStatus, number>;
 }
 
+export interface OcrPagePreviewItem {
+  id: string;
+  page_no: number;
+  status: string;
+  extracted_text: string | null;
+  extracted_latex: string | null;
+  updated_at: string;
+}
+
+export interface OcrJobPagesResponse {
+  job_id: string;
+  items: OcrPagePreviewItem[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 export interface ProblemListItem {
   id: string;
   ocr_page_id: string | null;
@@ -166,6 +183,13 @@ export function listOcrJobs(params?: {
   q?: string;
 }) {
   return requestJson<OcrJobListResponse>("/ocr/jobs", {
+    method: "GET",
+    query: params,
+  });
+}
+
+export function listOcrJobPages(jobId: string, params?: { limit?: number; offset?: number }) {
+  return requestJson<OcrJobPagesResponse>(`/ocr/jobs/${jobId}/pages`, {
     method: "GET",
     query: params,
   });
