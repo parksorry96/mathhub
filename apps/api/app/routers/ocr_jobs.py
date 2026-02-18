@@ -164,6 +164,8 @@ def _build_question_preview_items_for_page(
     job_id: UUID,
     page: dict,
     materialized_asset_map: dict[str, list[OCRQuestionAssetPreview]],
+    preview_asset_extractor: ProblemAssetExtractor | None = None,
+    preview_asset_s3_client=None,
 ) -> list[OCRQuestionPreviewItem]:
     page_text = (page.get("extracted_text") or page.get("extracted_latex") or "").strip()
     raw_payload = page.get("raw_payload")
@@ -214,7 +216,35 @@ def _build_question_preview_items_for_page(
             candidate_index=candidate_index,
         )
         materialized_asset_previews = list(materialized_asset_map.get(external_problem_key) or [])
-        for preview in materialized_asset_previews:
+        generated_asset_previews: list[OCRQuestionAssetPreview] = []
+        if (
+            not materialized_asset_previews
+            and preview_asset_extractor
+            and preview_asset_extractor.is_available
+            and asset_hints
+        ):
+            try:
+                extracted_assets = preview_asset_extractor.extract_and_upload(
+                    page_no=page["page_no"],
+                    candidate_no=candidate_index,
+                    external_problem_key=external_problem_key,
+                    asset_hints=asset_hints,
+                )
+                generated_asset_previews = [
+                    OCRQuestionAssetPreview(
+                        asset_type=extracted.asset_type,
+                        storage_key=extracted.storage_key,
+                        preview_url=_resolve_asset_preview_url(extracted.storage_key, preview_asset_s3_client),
+                        page_no=extracted.page_no,
+                        bbox=extracted.bbox if isinstance(extracted.bbox, dict) else None,
+                    )
+                    for extracted in extracted_assets
+                ]
+            except Exception:
+                generated_asset_previews = []
+
+        resolved_asset_previews = materialized_asset_previews or generated_asset_previews
+        for preview in resolved_asset_previews:
             if preview.asset_type not in asset_types:
                 asset_types.append(preview.asset_type)
         asset_types = sorted(set(asset_types))
@@ -235,9 +265,9 @@ def _build_question_preview_items_for_page(
                 else None,
                 provider=str(candidate.get("provider")) if candidate.get("provider") is not None else None,
                 model=str(candidate.get("model")) if candidate.get("model") is not None else None,
-                has_visual_asset=bool(asset_types) or bool(materialized_asset_previews),
+                has_visual_asset=bool(asset_types) or bool(resolved_asset_previews),
                 asset_types=asset_types,
-                asset_previews=materialized_asset_previews,
+                asset_previews=resolved_asset_previews,
                 updated_at=page["updated_at"],
             )
         )
@@ -747,12 +777,14 @@ def list_ocr_job_questions(
     limit: int = Query(default=200, ge=1, le=2000),
     offset: int = Query(default=0, ge=0),
 ) -> OCRJobQuestionsResponse:
+    job_storage_key: str | None = None
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT j.id
+                SELECT j.id, d.storage_key
                 FROM ocr_jobs j
+                JOIN ocr_documents d ON d.id = j.document_id
                 WHERE j.id = %s
                 """,
                 (str(job_id),),
@@ -763,6 +795,7 @@ def list_ocr_job_questions(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"OCR job not found: {job_id}",
                 )
+            job_storage_key = str(job.get("storage_key") or "").strip()
 
             cur.execute(
                 """
@@ -776,16 +809,50 @@ def list_ocr_job_questions(
             pages = cur.fetchall()
 
     materialized_asset_map = _load_materialized_asset_preview_map(job_id)
+    preview_asset_extractor: ProblemAssetExtractor | None = None
+    preview_asset_s3_client = None
+    if job_storage_key and job_storage_key.startswith("s3://"):
+        try:
+            source_bucket, source_key = parse_storage_key(job_storage_key)
+            preview_asset_s3_client = create_s3_client()
+            source_pdf_bytes = get_object_bytes(
+                client=preview_asset_s3_client,
+                bucket=source_bucket,
+                key=source_key,
+            )
+            try:
+                target_bucket = ensure_s3_bucket()
+            except Exception:
+                target_bucket = source_bucket
+
+            preview_asset_extractor = ProblemAssetExtractor(
+                pdf_bytes=source_pdf_bytes,
+                s3_client=preview_asset_s3_client,
+                bucket=target_bucket,
+                job_id=job_id,
+                prefix="ocr-preview-assets",
+            )
+            if not preview_asset_extractor.is_available:
+                preview_asset_extractor = None
+        except Exception:
+            preview_asset_extractor = None
+            preview_asset_s3_client = None
 
     all_items: list[OCRQuestionPreviewItem] = []
-    for page in pages:
-        all_items.extend(
-            _build_question_preview_items_for_page(
-                job_id=job_id,
-                page=page,
-                materialized_asset_map=materialized_asset_map,
+    try:
+        for page in pages:
+            all_items.extend(
+                _build_question_preview_items_for_page(
+                    job_id=job_id,
+                    page=page,
+                    materialized_asset_map=materialized_asset_map,
+                    preview_asset_extractor=preview_asset_extractor,
+                    preview_asset_s3_client=preview_asset_s3_client,
+                )
             )
-        )
+    finally:
+        if preview_asset_extractor:
+            preview_asset_extractor.close()
     all_items.sort(key=lambda item: (item.page_no, item.candidate_no))
 
     total = len(all_items)
@@ -1582,21 +1649,21 @@ def materialize_ocr_job_problems(
         updated_count = 0
         skipped_count = 0
         results: list[MaterializedProblemResult] = []
+        heuristic_api_base_url = get_ai_api_base_url()
+        heuristic_model = get_ai_model()
         try:
             for page in pages:
                 page_no = page["page_no"]
                 raw_payload = page.get("raw_payload") or {}
                 ai_classification = raw_payload.get("ai_classification")
-                if not isinstance(ai_classification, dict):
-                    continue
-
-                candidates = ai_classification.get("candidates")
-                if not isinstance(candidates, list):
-                    continue
 
                 fallback_layout_by_no: dict[int, dict] = {}
                 page_text = (page.get("extracted_text") or page.get("extracted_latex") or "").strip()
-                for derived in extract_problem_candidates(page_text, raw_payload if isinstance(raw_payload, dict) else None):
+                fallback_candidates = extract_problem_candidates(
+                    page_text,
+                    raw_payload if isinstance(raw_payload, dict) else None,
+                )
+                for derived in fallback_candidates:
                     if not isinstance(derived, dict):
                         continue
                     try:
@@ -1605,7 +1672,43 @@ def materialize_ocr_job_problems(
                         continue
                     fallback_layout_by_no[derived_no] = derived
 
-                for index, candidate in enumerate(candidates):
+                source_candidates: list[dict] = []
+                ai_candidates = ai_classification.get("candidates") if isinstance(ai_classification, dict) else None
+                if isinstance(ai_candidates, list) and ai_candidates:
+                    for candidate in ai_candidates:
+                        if not isinstance(candidate, dict):
+                            continue
+                        source_candidates.append(
+                            {
+                                **candidate,
+                                "_ingest_source": "ocr_ai_classification",
+                            }
+                        )
+                else:
+                    for candidate in fallback_candidates:
+                        if not isinstance(candidate, dict):
+                            continue
+                        statement_text = str(candidate.get("statement_text") or "").strip()
+                        if not statement_text:
+                            continue
+                        classified = classify_candidate(
+                            statement_text=statement_text,
+                            api_key=None,
+                            api_base_url=heuristic_api_base_url,
+                            model=heuristic_model,
+                        )
+                        source_candidates.append(
+                            {
+                                **candidate,
+                                **classified,
+                                "_ingest_source": "ocr_heuristic_materialize",
+                            }
+                        )
+
+                if not source_candidates:
+                    continue
+
+                for index, candidate in enumerate(source_candidates):
                     if not isinstance(candidate, dict):
                         skipped_count += 1
                         results.append(
@@ -1620,6 +1723,7 @@ def materialize_ocr_job_problems(
                         )
                         continue
 
+                    ingest_source = str(candidate.get("_ingest_source") or "ocr_heuristic_materialize")
                     candidate_no_raw = candidate.get("candidate_no")
                     try:
                         candidate_no = int(candidate_no_raw)
@@ -1724,7 +1828,7 @@ def materialize_ocr_job_problems(
                     metadata = {
                         "needs_review": True,
                         "ingest": {
-                            "source": "ocr_ai_classification",
+                            "source": ingest_source,
                             "job_id": str(job_id),
                             "page_no": page_no,
                             "candidate_no": candidate_no,
