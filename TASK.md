@@ -200,3 +200,12 @@
 - [x] AI classify 루프 중 행 상태(`ai_done`, `ai_processed/total`, provider/model)를 즉시 갱신
 - [x] 진행 중 작업이 있으면 2.5초 간격 백그라운드 무소음 polling으로 목록 자동 최신화
 - [x] 검증 완료 (`pnpm --filter @mathhub/web lint`, `pnpm --filter @mathhub/web build`)
+
+### 28. 수식 lim 배치/문항 시각요소 동시 렌더링 보강 — `566a0fd`
+- [x] `\lim_{...}` 패턴을 `\lim\limits_{...}`로 정규화해 아래첨자 렌더링 강제
+- [x] 본문 내 이미지 문법(`![...](url)`, `<img src=...>`, `\includegraphics{...}`) 파싱 및 표시 추가
+- [x] 문항 본문 + 자산 썸네일을 하나의 렌더러(`ProblemStatementView`)로 통합
+- [x] 작업목록 문항 미리보기에서 그래프/그림을 본문과 함께 표시하도록 교체
+- [x] 검수 화면에서 문제 본문과 그래프/그림을 한 카드 내 동시 표시로 교체
+- [x] 시각요소 감지/추출 상태 안내 문구 개선(미추출 시 재적재 가이드)
+- [x] 검증 완료 (`pnpm --filter @mathhub/web lint`, `pnpm --filter @mathhub/web build`)
