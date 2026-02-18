@@ -106,3 +106,9 @@
 ### 13. API 환경변수 샘플 추가 — `3883ae4`
 - [x] API 실행용 `.env.example` 추가 (`apps/api/.env.example`)
 - [x] Mathpix/AI/S3 필수 및 선택 환경변수 템플릿 정리
+
+### 14. API `.env` 자동 로드 및 빈값 정규화 — `96d1f70`
+- [x] API 시작 시 `apps/api/.env` 자동 로드 추가 (`python-dotenv`)
+- [x] 환경변수 빈 문자열을 `None`으로 정규화하도록 `config` getter 공통화
+- [x] `S3_ENDPOINT_URL=` 빈값일 때 boto3 `Invalid endpoint` 오류 해결
+- [x] 의존성 반영 (`apps/api/pyproject.toml`, `apps/api/requirements.txt`)
