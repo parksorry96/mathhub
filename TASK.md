@@ -159,3 +159,9 @@
 - [x] `sync/materialize` 응답 타입을 API 클라이언트에 명시해 타입 안정성 강화
 - [x] legacy `upload://` 작업은 자동실행 시작 불가하도록 비활성/툴팁 처리
 - [x] 검증 완료 (`pnpm --filter @mathhub/web lint`, `pnpm --filter @mathhub/web build`)
+
+### 22. 검수 화면 수식 렌더링 적용 — `47b4cce`
+- [x] 검수 본문(`review`)에 `better-react-mathjax` 적용
+- [x] OCR/AI에서 넘어온 LaTeX가 텍스트가 아니라 수식 형태로 보이도록 UX 개선
+- [x] 기존 검수 플로우(승인/반려/이전/다음) 동작 유지
+- [x] 검증 완료 (`pnpm --filter @mathhub/web lint`, `pnpm --filter @mathhub/web build`)
