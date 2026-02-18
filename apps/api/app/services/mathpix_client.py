@@ -11,8 +11,13 @@ def submit_mathpix_pdf(
     app_key: str,
     base_url: str,
     callback_url: str | None = None,
+    include_diagram_text: bool = True,
 ) -> dict:
-    payload: dict = {"url": file_url}
+    payload: dict = {
+        "url": file_url,
+        # Keep diagram/chart internal text in lines.json to improve graph detection.
+        "include_diagram_text": include_diagram_text,
+    }
     if callback_url:
         payload["callback"] = callback_url
 
@@ -169,7 +174,8 @@ def extract_mathpix_pages(payload: dict) -> list[dict]:
 
     line_data = payload.get("line_data")
     if isinstance(line_data, list):
-        lines = [line.get("text") for line in line_data if isinstance(line, dict) and isinstance(line.get("text"), str)]
+        lines = [_extract_line_text(line) for line in line_data if isinstance(line, dict)]
+        lines = [line for line in lines if isinstance(line, str) and line]
         pages.append(
             {
                 "page_no": 1,
@@ -215,11 +221,9 @@ def extract_mathpix_pages_from_lines(payload: dict) -> list[dict]:
             for line in lines:
                 if not isinstance(line, dict):
                     continue
-                text = line.get("text")
-                if isinstance(text, str):
-                    stripped = text.strip()
-                    if stripped:
-                        text_lines.append(stripped)
+                text = _extract_line_text(line)
+                if text:
+                    text_lines.append(text)
 
         extracted_text = "\n".join(text_lines).strip() if text_lines else None
         extracted_latex = _first_non_empty_str(item, ("latex_styled", "latex"))
@@ -234,6 +238,90 @@ def extract_mathpix_pages_from_lines(payload: dict) -> list[dict]:
         )
 
     return pages
+
+
+def merge_mathpix_pages(
+    *,
+    status_pages: list[dict],
+    line_pages: list[dict],
+) -> list[dict]:
+    """Merge status-derived pages with lines.json pages (preferring lines raw payload)."""
+    merged_by_page_no: dict[int, dict] = {}
+
+    for index, page in enumerate(status_pages, start=1):
+        if not isinstance(page, dict):
+            continue
+        page_no = _to_page_no(page.get("page_no"), fallback=index)
+        merged_by_page_no[page_no] = {
+            "page_no": page_no,
+            "extracted_text": page.get("extracted_text"),
+            "extracted_latex": page.get("extracted_latex"),
+            "raw_payload": page.get("raw_payload"),
+        }
+
+    for index, page in enumerate(line_pages, start=1):
+        if not isinstance(page, dict):
+            continue
+        page_no = _to_page_no(page.get("page_no"), fallback=index)
+        line_raw = page.get("raw_payload")
+        existing = merged_by_page_no.get(page_no)
+        if not existing:
+            merged_by_page_no[page_no] = {
+                "page_no": page_no,
+                "extracted_text": page.get("extracted_text"),
+                "extracted_latex": page.get("extracted_latex"),
+                "raw_payload": line_raw,
+            }
+            continue
+
+        status_raw = existing.get("raw_payload")
+        merged_raw: dict | object
+        if isinstance(line_raw, dict):
+            merged_raw = dict(line_raw)
+            if isinstance(status_raw, dict):
+                for key, value in status_raw.items():
+                    merged_raw.setdefault(key, value)
+                merged_raw["_mathpix_status_page"] = status_raw
+        else:
+            merged_raw = status_raw if status_raw is not None else line_raw
+
+        existing["extracted_text"] = page.get("extracted_text") or existing.get("extracted_text")
+        existing["extracted_latex"] = existing.get("extracted_latex") or page.get("extracted_latex")
+        existing["raw_payload"] = merged_raw
+
+    return [merged_by_page_no[page_no] for page_no in sorted(merged_by_page_no)]
+
+
+def _to_page_no(value: object, *, fallback: int) -> int:
+    try:
+        page_no = int(value)  # type: ignore[arg-type]
+    except Exception:
+        page_no = fallback
+    if page_no <= 0:
+        return fallback
+    return page_no
+
+
+def _extract_line_text(line: dict) -> str | None:
+    text = line.get("text")
+    if isinstance(text, str):
+        stripped = text.strip()
+        if stripped:
+            return stripped
+
+    conversion_output = line.get("conversion_output")
+    if isinstance(conversion_output, str):
+        stripped = conversion_output.strip()
+        if stripped:
+            return stripped
+    if isinstance(conversion_output, dict):
+        for key in ("text", "markdown", "latex_styled", "latex", "value"):
+            value = conversion_output.get(key)
+            if isinstance(value, str):
+                stripped = value.strip()
+                if stripped:
+                    return stripped
+    return None
 
 
 def _first_non_empty_str(source: dict, keys: tuple[str, ...]) -> str | None:

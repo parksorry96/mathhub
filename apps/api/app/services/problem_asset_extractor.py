@@ -159,8 +159,17 @@ def _resolve_clip_rect(*, page, bbox: dict | None) -> tuple[object | None, dict 
         x0, x1 = x0 * page_w, x1 * page_w
         y0, y1 = y0 * page_h, y1 * page_h
     else:
+        source_dimensions = _resolve_source_dimensions(bbox)
+        if source_dimensions:
+            source_w, source_h = source_dimensions
+            scale_x = page_w / source_w
+            scale_y = page_h / source_h
+            x0 *= scale_x
+            x1 *= scale_x
+            y0 *= scale_y
+            y1 *= scale_y
         # Scale down pixel-like coordinates if they are much larger than page points.
-        if x1 > page_w * 1.8 or y1 > page_h * 1.8:
+        elif x1 > page_w * 1.8 or y1 > page_h * 1.8:
             scale_x = page_w / max(x1, page_w)
             scale_y = page_h / max(y1, page_h)
             x0 *= scale_x
@@ -188,6 +197,16 @@ def _resolve_clip_rect(*, page, bbox: dict | None) -> tuple[object | None, dict 
 
 
 def _to_xyxy(bbox: dict) -> tuple[float, float, float, float] | None:
+    if {"x0_ratio", "y0_ratio", "x1_ratio", "y1_ratio"} <= set(bbox):
+        try:
+            return (
+                float(bbox["x0_ratio"]),
+                float(bbox["y0_ratio"]),
+                float(bbox["x1_ratio"]),
+                float(bbox["y1_ratio"]),
+            )
+        except Exception:
+            return None
     if {"x1", "y1", "x2", "y2"} <= set(bbox):
         try:
             return float(bbox["x1"]), float(bbox["y1"]), float(bbox["x2"]), float(bbox["y2"])
@@ -216,4 +235,26 @@ def _to_xyxy(bbox: dict) -> tuple[float, float, float, float] | None:
             return x, y, x + w, y + h
         except Exception:
             return None
+    return None
+
+
+def _resolve_source_dimensions(bbox: dict) -> tuple[float, float] | None:
+    source_w = _to_positive_float(
+        bbox.get("source_page_width") or bbox.get("page_width") or bbox.get("source_width")
+    )
+    source_h = _to_positive_float(
+        bbox.get("source_page_height") or bbox.get("page_height") or bbox.get("source_height")
+    )
+    if source_w and source_h:
+        return source_w, source_h
+    return None
+
+
+def _to_positive_float(value: object) -> float | None:
+    try:
+        parsed = float(value)  # type: ignore[arg-type]
+    except Exception:
+        return None
+    if parsed > 0:
+        return parsed
     return None

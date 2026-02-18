@@ -210,6 +210,7 @@ class OCRJobMathpixSubmitRequest(BaseModel):
     app_id: str | None = None
     app_key: str | None = None
     base_url: str | None = None
+    include_diagram_text: bool = True
 
 
 class OCRJobMathpixSubmitResponse(BaseModel):

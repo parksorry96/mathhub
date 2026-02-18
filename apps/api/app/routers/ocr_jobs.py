@@ -49,6 +49,7 @@ from app.services.mathpix_client import (
     fetch_mathpix_pdf_lines,
     fetch_mathpix_pdf_status,
     map_mathpix_job_status,
+    merge_mathpix_pages,
     resolve_provider_job_id,
     submit_mathpix_pdf,
 )
@@ -850,6 +851,7 @@ def submit_ocr_job_to_mathpix(
                 app_key=app_key,
                 base_url=base_url,
                 callback_url=payload.callback_url,
+                include_diagram_text=payload.include_diagram_text,
             )
         except Exception as exc:
             raise HTTPException(
@@ -960,7 +962,7 @@ def sync_ocr_job_with_mathpix(
 
         mapped_status, progress_pct, error_message = map_mathpix_job_status(status_result)
         pages = extract_mathpix_pages(status_result)
-        if not pages and mapped_status == "completed":
+        if mapped_status == "completed":
             try:
                 lines_result = fetch_mathpix_pdf_lines(
                     provider_job_id=provider_job_id,
@@ -968,7 +970,9 @@ def sync_ocr_job_with_mathpix(
                     app_key=app_key,
                     base_url=base_url,
                 )
-                pages = extract_mathpix_pages_from_lines(lines_result)
+                line_pages = extract_mathpix_pages_from_lines(lines_result)
+                if line_pages:
+                    pages = merge_mathpix_pages(status_pages=pages, line_pages=line_pages)
             except Exception:
                 # Keep the original status path; page extraction can be retried with next sync.
                 pass

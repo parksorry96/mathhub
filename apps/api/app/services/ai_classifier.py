@@ -27,14 +27,46 @@ NUMBER_WITH_BEON_SPLIT_RE = re.compile(r"(?m)^\s*(\d{1,2})\s*번\s+")
 
 TEXT_ASSET_KEYWORDS: dict[str, tuple[str, ...]] = {
     "image": ("그림", "도형", "diagram", "figure", "image", "사진"),
-    "graph": ("그래프", "좌표평면", "plot", "graph", "chart", "곡선"),
+    "graph": ("그래프", "좌표평면", "좌표축", "plot", "graph", "chart", "곡선"),
     "table": ("표", "table", "tabular", "도수분포표"),
 }
 
 PAYLOAD_ASSET_TOKENS: dict[str, tuple[str, ...]] = {
     "image": ("image", "figure", "diagram", "img", "picture"),
-    "graph": ("graph", "plot", "chart", "axis", "coordinate"),
+    "graph": (
+        "graph",
+        "plot",
+        "chart",
+        "axis",
+        "coordinate",
+        "x_axis_label",
+        "y_axis_label",
+        "x_axis_tick_label",
+        "y_axis_tick_label",
+        "legend_label",
+        "chart_info",
+    ),
     "table": ("table", "tabular", "grid"),
+}
+
+GRAPH_NODE_TYPES = {
+    "chart",
+    "chart_info",
+    "x_axis_label",
+    "y_axis_label",
+    "x_axis_tick_label",
+    "y_axis_tick_label",
+    "legend_label",
+    "model_label",
+}
+GRAPH_DIAGRAM_SUBTYPES = {
+    "line",
+    "scatter",
+    "bar",
+    "column",
+    "area",
+    "pie",
+    "analytical",
 }
 
 
@@ -122,6 +154,9 @@ def collect_problem_asset_hints(
 ) -> list[dict]:
     hints: list[dict] = []
     normalized = statement_text.strip().lower()
+    source_dimensions = (
+        _resolve_source_dimensions(page_raw_payload) if isinstance(page_raw_payload, dict) else None
+    )
 
     if normalized:
         for asset_type, keywords in TEXT_ASSET_KEYWORDS.items():
@@ -137,7 +172,7 @@ def collect_problem_asset_hints(
                 )
 
     if isinstance(page_raw_payload, dict):
-        payload_hints = _collect_payload_asset_hints(page_raw_payload)
+        payload_hints = _collect_payload_asset_hints(page_raw_payload, source_dimensions=source_dimensions)
         if isinstance(candidate_bbox, dict):
             payload_hints = _filter_asset_hints_by_candidate_bbox(payload_hints, candidate_bbox)
         hints.extend(payload_hints)
@@ -185,38 +220,100 @@ def _collect_payload_text_hints(payload: dict) -> list[dict]:
     return hints
 
 
-def _collect_payload_asset_hints(payload: Any, depth: int = 0) -> list[dict]:
+def _collect_payload_asset_hints(
+    payload: Any,
+    depth: int = 0,
+    source_dimensions: tuple[float, float] | None = None,
+) -> list[dict]:
     if depth > 6:
         return []
 
     hints: list[dict] = []
 
     if isinstance(payload, dict):
+        if depth == 0 and source_dimensions is None:
+            source_dimensions = _resolve_source_dimensions(payload)
         inferred_type = _infer_asset_type_from_node(payload)
         if inferred_type:
             hints.append(
                 {
                     "asset_type": inferred_type,
                     "source": "raw_payload_node",
-                    "bbox": _extract_bbox(payload),
+                    "bbox": _extract_bbox(payload, source_dimensions=source_dimensions),
                     "evidence": _collect_node_tokens(payload),
                 }
             )
         for value in payload.values():
-            hints.extend(_collect_payload_asset_hints(value, depth + 1))
+            hints.extend(
+                _collect_payload_asset_hints(
+                    value,
+                    depth + 1,
+                    source_dimensions=source_dimensions,
+                )
+            )
         return hints
 
     if isinstance(payload, list):
         for item in payload:
-            hints.extend(_collect_payload_asset_hints(item, depth + 1))
+            hints.extend(
+                _collect_payload_asset_hints(
+                    item,
+                    depth + 1,
+                    source_dimensions=source_dimensions,
+                )
+            )
         return hints
 
     return hints
 
 
+def _resolve_source_dimensions(payload: dict) -> tuple[float, float] | None:
+    direct_w = _to_positive_float(payload.get("page_width"))
+    direct_h = _to_positive_float(payload.get("page_height"))
+    if direct_w and direct_h:
+        return (direct_w, direct_h)
+
+    page_info = payload.get("page_info")
+    if isinstance(page_info, dict):
+        info_w = _to_positive_float(page_info.get("width") or page_info.get("page_width"))
+        info_h = _to_positive_float(page_info.get("height") or page_info.get("page_height"))
+        if info_w and info_h:
+            return (info_w, info_h)
+
+    lines_raw = payload.get("lines")
+    if isinstance(lines_raw, list):
+        for node in lines_raw:
+            if not isinstance(node, dict):
+                continue
+            node_type = str(node.get("type") or "").strip().lower()
+            if node_type != "page_info":
+                continue
+            region = node.get("region")
+            if isinstance(region, dict):
+                region_w = _to_positive_float(region.get("width"))
+                region_h = _to_positive_float(region.get("height"))
+                if region_w and region_h:
+                    return (region_w, region_h)
+            node_w = _to_positive_float(node.get("page_width") or node.get("width"))
+            node_h = _to_positive_float(node.get("page_height") or node.get("height"))
+            if node_w and node_h:
+                return (node_w, node_h)
+    return None
+
+
+def _to_positive_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except Exception:
+        return None
+    if parsed > 0:
+        return parsed
+    return None
+
+
 def _collect_node_tokens(node: dict) -> list[str]:
     tokens: list[str] = []
-    for key in ("type", "kind", "class", "label", "name", "category"):
+    for key in ("type", "subtype", "kind", "class", "label", "name", "category"):
         value = node.get(key)
         if isinstance(value, str) and value.strip():
             tokens.append(value.strip().lower())
@@ -224,6 +321,13 @@ def _collect_node_tokens(node: dict) -> list[str]:
 
 
 def _infer_asset_type_from_node(node: dict) -> str | None:
+    node_type = str(node.get("type") or "").strip().lower()
+    node_subtype = str(node.get("subtype") or "").strip().lower()
+    if node_type in GRAPH_NODE_TYPES:
+        return "graph"
+    if node_type == "diagram" and node_subtype in GRAPH_DIAGRAM_SUBTYPES:
+        return "graph"
+
     tokens = _collect_node_tokens(node)
     combined = " ".join(tokens)
     if not combined:
@@ -238,11 +342,15 @@ def _infer_asset_type_from_node(node: dict) -> str | None:
     return None
 
 
-def _extract_bbox(node: dict) -> dict | None:
+def _extract_bbox(
+    node: dict,
+    *,
+    source_dimensions: tuple[float, float] | None = None,
+) -> dict | None:
     for key in ("bbox", "cnt"):
         xyxy = _to_bbox_xyxy(node.get(key))
         if xyxy:
-            return _bbox_dict_from_xyxy(xyxy)
+            return _bbox_dict_from_xyxy(xyxy, source_dimensions=source_dimensions)
 
     region = node.get("region")
     if isinstance(region, dict):
@@ -256,13 +364,13 @@ def _extract_bbox(node: dict) -> dict | None:
                 y1 = float(top_left_y)
                 x2 = x1 + float(width)
                 y2 = y1 + float(height)
-                return _bbox_dict_from_xyxy((x1, y1, x2, y2))
+                return _bbox_dict_from_xyxy((x1, y1, x2, y2), source_dimensions=source_dimensions)
             except Exception:
                 pass
 
     xyxy = _to_bbox_xyxy(node)
     if xyxy:
-        return _bbox_dict_from_xyxy(xyxy)
+        return _bbox_dict_from_xyxy(xyxy, source_dimensions=source_dimensions)
     return None
 
 
@@ -298,6 +406,7 @@ def _extract_problem_candidates_from_layout(payload: dict) -> list[dict]:
     if not isinstance(lines_raw, list):
         return []
 
+    source_dimensions = _resolve_source_dimensions(payload)
     nodes = [item for item in lines_raw if isinstance(item, dict)]
     if len(nodes) < 3:
         return []
@@ -311,13 +420,13 @@ def _extract_problem_candidates_from_layout(payload: dict) -> list[dict]:
         if not isinstance(children, list) or not children:
             continue
 
-        root_bbox = _extract_bbox(node)
+        root_bbox = _extract_bbox(node, source_dimensions=source_dimensions)
         if not root_bbox:
             continue
 
         descendants = [node, *_collect_descendants(node, node_by_id)]
-        statement_text = _build_statement_text(descendants)
-        candidate_no = _infer_candidate_no(descendants)
+        statement_text = _build_statement_text(descendants, source_dimensions=source_dimensions)
+        candidate_no = _infer_candidate_no(descendants, source_dimensions=source_dimensions)
         has_choice_block = any(
             str(item.get("type") or "").strip().lower() == "multiple_choice_block"
             for item in descendants
@@ -348,13 +457,17 @@ def _extract_problem_candidates_from_layout(payload: dict) -> list[dict]:
     used_candidate_no: set[int] = set()
     finalized: list[dict] = []
     for index, item in enumerate(ordered, start=1):
-        bbox = _extract_bbox(item) if not isinstance(item.get("bbox"), dict) else item.get("bbox")
+        bbox = (
+            _extract_bbox(item, source_dimensions=source_dimensions)
+            if not isinstance(item.get("bbox"), dict)
+            else item.get("bbox")
+        )
         if not isinstance(bbox, dict):
             continue
         xyxy = _to_bbox_xyxy(bbox)
         if not xyxy:
             continue
-        bbox = _bbox_dict_from_xyxy(xyxy)
+        bbox = _bbox_dict_from_xyxy(xyxy, source_dimensions=source_dimensions)
         x1, _, x2, _ = xyxy
         center_x = (x1 + x2) / 2.0
 
@@ -430,7 +543,11 @@ def _extract_node_text(node: dict) -> str:
     return ""
 
 
-def _build_statement_text(nodes: list[dict]) -> str:
+def _build_statement_text(
+    nodes: list[dict],
+    *,
+    source_dimensions: tuple[float, float] | None = None,
+) -> str:
     rows: list[tuple[float, float, str]] = []
     for node in nodes:
         if not isinstance(node, dict):
@@ -441,7 +558,7 @@ def _build_statement_text(nodes: list[dict]) -> str:
         text = _extract_node_text(node)
         if not text:
             continue
-        bbox = _extract_bbox(node)
+        bbox = _extract_bbox(node, source_dimensions=source_dimensions)
         xyxy = _to_bbox_xyxy(bbox)
         if xyxy:
             x1, y1, _, _ = xyxy
@@ -463,7 +580,11 @@ def _build_statement_text(nodes: list[dict]) -> str:
     return "\n".join(deduped).strip()
 
 
-def _infer_candidate_no(nodes: list[dict]) -> int | None:
+def _infer_candidate_no(
+    nodes: list[dict],
+    *,
+    source_dimensions: tuple[float, float] | None = None,
+) -> int | None:
     rows: list[tuple[float, float, str]] = []
     for node in nodes:
         if not isinstance(node, dict):
@@ -471,7 +592,7 @@ def _infer_candidate_no(nodes: list[dict]) -> int | None:
         text = _extract_node_text(node)
         if not text:
             continue
-        bbox = _extract_bbox(node)
+        bbox = _extract_bbox(node, source_dimensions=source_dimensions)
         xyxy = _to_bbox_xyxy(bbox)
         if xyxy:
             x1, y1, _, _ = xyxy
@@ -621,9 +742,19 @@ def _to_bbox_xyxy(bbox: Any) -> tuple[float, float, float, float] | None:
     return None
 
 
-def _bbox_dict_from_xyxy(xyxy: tuple[float, float, float, float]) -> dict:
+def _bbox_dict_from_xyxy(
+    xyxy: tuple[float, float, float, float],
+    *,
+    source_dimensions: tuple[float, float] | None = None,
+) -> dict:
     x1, y1, x2, y2 = xyxy
-    return {"x1": float(x1), "y1": float(y1), "x2": float(x2), "y2": float(y2)}
+    bbox: dict[str, float] = {"x1": float(x1), "y1": float(y1), "x2": float(x2), "y2": float(y2)}
+    if source_dimensions:
+        source_w, source_h = source_dimensions
+        if source_w > 0 and source_h > 0:
+            bbox["source_page_width"] = float(source_w)
+            bbox["source_page_height"] = float(source_h)
+    return bbox
 
 
 def _bbox_area(xyxy: tuple[float, float, float, float]) -> float:
