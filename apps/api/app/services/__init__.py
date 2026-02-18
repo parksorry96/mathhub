@@ -1,4 +1,4 @@
-from app.services.ai_classifier import classify_candidate, extract_problem_candidates
+from app.services.ai_classifier import classify_candidate, collect_problem_asset_hints, extract_problem_candidates
 from app.services.mathpix_client import (
     extract_mathpix_pages,
     extract_mathpix_pages_from_lines,
@@ -20,6 +20,7 @@ from app.services.s3_storage import (
 
 __all__ = [
     "classify_candidate",
+    "collect_problem_asset_hints",
     "extract_problem_candidates",
     "submit_mathpix_pdf",
     "fetch_mathpix_pdf_status",

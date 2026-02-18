@@ -58,6 +58,30 @@ export interface OcrJobPagesResponse {
   offset: number;
 }
 
+export interface OcrQuestionPreviewItem {
+  page_id: string;
+  page_no: number;
+  candidate_no: number;
+  candidate_key: string;
+  split_strategy: string;
+  statement_text: string;
+  confidence: string | null;
+  validation_status: string | null;
+  provider: string | null;
+  model: string | null;
+  has_visual_asset: boolean;
+  asset_types: string[];
+  updated_at: string;
+}
+
+export interface OcrJobQuestionsResponse {
+  job_id: string;
+  items: OcrQuestionPreviewItem[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 export interface OcrJobAiClassifyStepResponse {
   job_id: string;
   done: boolean;
@@ -248,6 +272,13 @@ export function listOcrJobs(params?: {
 
 export function listOcrJobPages(jobId: string, params?: { limit?: number; offset?: number }) {
   return requestJson<OcrJobPagesResponse>(`/ocr/jobs/${jobId}/pages`, {
+    method: "GET",
+    query: params,
+  });
+}
+
+export function listOcrJobQuestions(jobId: string, params?: { limit?: number; offset?: number }) {
+  return requestJson<OcrJobQuestionsResponse>(`/ocr/jobs/${jobId}/questions`, {
     method: "GET",
     query: params,
   });

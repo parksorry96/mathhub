@@ -1,6 +1,7 @@
 import json
 import re
 from decimal import Decimal
+from typing import Any
 
 import httpx
 
@@ -20,6 +21,21 @@ ALLOWED_SOURCE_TYPES = {
 ALLOWED_VALIDATION_STATUSES = {"valid", "needs_review", "invalid"}
 
 CANDIDATE_SPLIT_RE = re.compile(r"(?m)^\s*(\d{1,2})\s*[\.)]\s+")
+BRACKETED_CANDIDATE_SPLIT_RE = re.compile(r"(?m)^\s*\[(\d{1,2})\]\s+")
+QUESTION_LABEL_SPLIT_RE = re.compile(r"(?m)^\s*문항\s*(\d{1,2})\s*(?:번)?\s*[:.)]?\s*")
+NUMBER_WITH_BEON_SPLIT_RE = re.compile(r"(?m)^\s*(\d{1,2})\s*번\s+")
+
+TEXT_ASSET_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "image": ("그림", "도형", "diagram", "figure", "image", "사진"),
+    "graph": ("그래프", "좌표평면", "plot", "graph", "chart", "곡선"),
+    "table": ("표", "table", "tabular", "도수분포표"),
+}
+
+PAYLOAD_ASSET_TOKENS: dict[str, tuple[str, ...]] = {
+    "image": ("image", "figure", "diagram", "img", "picture"),
+    "graph": ("graph", "plot", "chart", "axis", "coordinate"),
+    "table": ("table", "tabular", "grid"),
+}
 
 
 def extract_problem_candidates(text: str) -> list[dict]:
@@ -27,9 +43,9 @@ def extract_problem_candidates(text: str) -> list[dict]:
     if not cleaned:
         return []
 
-    matches = list(CANDIDATE_SPLIT_RE.finditer(cleaned))
+    matches, split_strategy = _select_best_split_matches(cleaned)
     if not matches:
-        return [{"candidate_no": 1, "statement_text": cleaned}]
+        return [{"candidate_no": 1, "statement_text": cleaned, "split_strategy": "full_page_fallback"}]
 
     candidates: list[dict] = []
     for index, match in enumerate(matches):
@@ -42,9 +58,229 @@ def extract_problem_candidates(text: str) -> list[dict]:
             {
                 "candidate_no": int(match.group(1)),
                 "statement_text": statement_text,
+                "split_strategy": split_strategy,
             }
         )
     return candidates
+
+
+def _select_best_split_matches(text: str) -> tuple[list[re.Match], str]:
+    patterns = [
+        ("numbered", CANDIDATE_SPLIT_RE),
+        ("bracketed", BRACKETED_CANDIDATE_SPLIT_RE),
+        ("question_label", QUESTION_LABEL_SPLIT_RE),
+        ("number_with_beon", NUMBER_WITH_BEON_SPLIT_RE),
+    ]
+
+    best_matches: list[re.Match] = []
+    best_strategy = "numbered"
+    best_score = -1
+
+    for strategy, pattern in patterns:
+        matches = list(pattern.finditer(text))
+        if not matches:
+            continue
+
+        numbers: list[int] = []
+        for match in matches:
+            try:
+                numbers.append(int(match.group(1)))
+            except Exception:
+                pass
+        score = len(matches)
+        if _is_likely_problem_sequence(numbers):
+            score += 2
+
+        if score > best_score:
+            best_score = score
+            best_matches = matches
+            best_strategy = strategy
+
+    return best_matches, best_strategy
+
+
+def _is_likely_problem_sequence(numbers: list[int]) -> bool:
+    if len(numbers) <= 1:
+        return False
+    increasing = 0
+    for previous, current in zip(numbers, numbers[1:]):
+        if 0 < current - previous <= 3:
+            increasing += 1
+    return increasing >= max(1, len(numbers) - 2)
+
+
+def collect_problem_asset_hints(statement_text: str, page_raw_payload: dict | None = None) -> list[dict]:
+    hints: list[dict] = []
+    normalized = statement_text.strip().lower()
+
+    if normalized:
+        for asset_type, keywords in TEXT_ASSET_KEYWORDS.items():
+            matched = [keyword for keyword in keywords if keyword.lower() in normalized]
+            if matched:
+                hints.append(
+                    {
+                        "asset_type": asset_type,
+                        "source": "statement_text",
+                        "bbox": None,
+                        "evidence": matched,
+                    }
+                )
+
+    if isinstance(page_raw_payload, dict):
+        hints.extend(_collect_payload_asset_hints(page_raw_payload))
+        hints.extend(_collect_payload_text_hints(page_raw_payload))
+
+    return _dedupe_asset_hints(hints)
+
+
+def _collect_payload_text_hints(payload: dict) -> list[dict]:
+    try:
+        serialized = json.dumps(payload, ensure_ascii=False).lower()
+    except Exception:
+        return []
+
+    hints: list[dict] = []
+    for asset_type, tokens in PAYLOAD_ASSET_TOKENS.items():
+        matched = [token for token in tokens if token in serialized]
+        if not matched:
+            continue
+        hints.append(
+            {
+                "asset_type": asset_type,
+                "source": "raw_payload_text",
+                "bbox": None,
+                "evidence": matched[:5],
+            }
+        )
+    return hints
+
+
+def _collect_payload_asset_hints(payload: Any, depth: int = 0) -> list[dict]:
+    if depth > 6:
+        return []
+
+    hints: list[dict] = []
+
+    if isinstance(payload, dict):
+        inferred_type = _infer_asset_type_from_node(payload)
+        if inferred_type:
+            hints.append(
+                {
+                    "asset_type": inferred_type,
+                    "source": "raw_payload_node",
+                    "bbox": _extract_bbox(payload),
+                    "evidence": _collect_node_tokens(payload),
+                }
+            )
+        for value in payload.values():
+            hints.extend(_collect_payload_asset_hints(value, depth + 1))
+        return hints
+
+    if isinstance(payload, list):
+        for item in payload:
+            hints.extend(_collect_payload_asset_hints(item, depth + 1))
+        return hints
+
+    return hints
+
+
+def _collect_node_tokens(node: dict) -> list[str]:
+    tokens: list[str] = []
+    for key in ("type", "kind", "class", "label", "name", "category"):
+        value = node.get(key)
+        if isinstance(value, str) and value.strip():
+            tokens.append(value.strip().lower())
+    return tokens[:6]
+
+
+def _infer_asset_type_from_node(node: dict) -> str | None:
+    tokens = _collect_node_tokens(node)
+    combined = " ".join(tokens)
+    if not combined:
+        return None
+
+    if any(token in combined for token in PAYLOAD_ASSET_TOKENS["graph"]):
+        return "graph"
+    if any(token in combined for token in PAYLOAD_ASSET_TOKENS["table"]):
+        return "table"
+    if any(token in combined for token in PAYLOAD_ASSET_TOKENS["image"]):
+        return "image"
+    return None
+
+
+def _extract_bbox(node: dict) -> dict | None:
+    bbox_value = node.get("bbox")
+    if isinstance(bbox_value, dict):
+        return bbox_value
+    if isinstance(bbox_value, list) and len(bbox_value) == 4:
+        try:
+            return {
+                "x1": float(bbox_value[0]),
+                "y1": float(bbox_value[1]),
+                "x2": float(bbox_value[2]),
+                "y2": float(bbox_value[3]),
+            }
+        except Exception:
+            return None
+
+    left = node.get("left")
+    top = node.get("top")
+    right = node.get("right")
+    bottom = node.get("bottom")
+    if all(value is not None for value in (left, top, right, bottom)):
+        try:
+            return {
+                "left": float(left),
+                "top": float(top),
+                "right": float(right),
+                "bottom": float(bottom),
+            }
+        except Exception:
+            return None
+
+    x = node.get("x")
+    y = node.get("y")
+    width = node.get("w") or node.get("width")
+    height = node.get("h") or node.get("height")
+    if all(value is not None for value in (x, y, width, height)):
+        try:
+            return {
+                "x": float(x),
+                "y": float(y),
+                "w": float(width),
+                "h": float(height),
+            }
+        except Exception:
+            return None
+
+    return None
+
+
+def _dedupe_asset_hints(hints: list[dict]) -> list[dict]:
+    deduped: list[dict] = []
+    seen: set[tuple] = set()
+    for hint in hints:
+        asset_type = str(hint.get("asset_type") or "other").strip().lower()
+        if asset_type not in {"image", "table", "graph", "other"}:
+            asset_type = "other"
+        source = str(hint.get("source") or "unknown").strip().lower()
+        bbox = hint.get("bbox")
+        evidence = hint.get("evidence")
+        evidence_key = tuple(sorted(str(item) for item in evidence)) if isinstance(evidence, list) else tuple()
+        bbox_key = json.dumps(bbox, ensure_ascii=False, sort_keys=True) if isinstance(bbox, dict) else ""
+        key = (asset_type, source, bbox_key, evidence_key)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(
+            {
+                "asset_type": asset_type,
+                "source": source,
+                "bbox": bbox if isinstance(bbox, dict) else None,
+                "evidence": list(evidence_key) if evidence_key else [],
+            }
+        )
+    return deduped
 
 
 def classify_candidate(

@@ -24,7 +24,9 @@ import {
   TextField,
   Tooltip,
   Typography,
+  useMediaQuery,
 } from "@mui/material";
+import { useTheme } from "@mui/material/styles";
 import SearchRoundedIcon from "@mui/icons-material/SearchRounded";
 import RefreshRoundedIcon from "@mui/icons-material/RefreshRounded";
 import CloudUploadRoundedIcon from "@mui/icons-material/CloudUploadRounded";
@@ -39,12 +41,12 @@ import type {
   OcrJobAiClassifyStepResponse,
   OcrJobListItem,
   OcrJobMathpixSyncResponse,
-  OcrPagePreviewItem,
+  OcrQuestionPreviewItem,
 } from "@/lib/api";
 import {
   classifyOcrJobStep,
   deleteOcrJob,
-  listOcrJobPages,
+  listOcrJobQuestions,
   listOcrJobs,
   materializeProblems,
   submitMathpixJob,
@@ -104,6 +106,8 @@ function sleep(ms: number) {
 }
 
 export default function JobsPage() {
+  const theme = useTheme();
+  const isMobilePreview = useMediaQuery(theme.breakpoints.down("md"));
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -114,7 +118,8 @@ export default function JobsPage() {
   const [runningAction, setRunningAction] = useState<Record<string, string>>({});
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewTitle, setPreviewTitle] = useState("");
-  const [previewPages, setPreviewPages] = useState<OcrPagePreviewItem[]>([]);
+  const [previewQuestions, setPreviewQuestions] = useState<OcrQuestionPreviewItem[]>([]);
+  const [previewSelectedIndex, setPreviewSelectedIndex] = useState(0);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
 
@@ -278,17 +283,18 @@ export default function JobsPage() {
   const openPreview = useCallback(async (job: OcrJobListItem) => {
     setPreviewOpen(true);
     setPreviewTitle(job.original_filename);
-    setPreviewPages([]);
+    setPreviewQuestions([]);
+    setPreviewSelectedIndex(0);
     setPreviewError(null);
     setPreviewLoading(true);
     try {
-      const res = await listOcrJobPages(job.id, { limit: 50, offset: 0 });
-      setPreviewPages(res.items);
+      const res = await listOcrJobQuestions(job.id, { limit: 1000, offset: 0 });
+      setPreviewQuestions(res.items);
       if (res.items.length === 0) {
-        setPreviewError("아직 추출된 OCR 페이지가 없습니다. Mathpix 동기화를 먼저 실행하세요.");
+        setPreviewError("문항 단위 미리보기가 없습니다. OCR 동기화를 먼저 실행하세요.");
       }
     } catch (err) {
-      setPreviewError(err instanceof Error ? err.message : "OCR 페이지를 불러오지 못했습니다.");
+      setPreviewError(err instanceof Error ? err.message : "문항 미리보기를 불러오지 못했습니다.");
     } finally {
       setPreviewLoading(false);
     }
@@ -298,6 +304,17 @@ export default function JobsPage() {
     () => ["completed", "processing", "uploading", "queued", "failed", "cancelled"] as ApiJobStatus[],
     [],
   );
+  const selectedPreviewQuestion = previewQuestions[previewSelectedIndex] ?? null;
+
+  useEffect(() => {
+    if (previewQuestions.length === 0) {
+      setPreviewSelectedIndex(0);
+      return;
+    }
+    if (previewSelectedIndex >= previewQuestions.length) {
+      setPreviewSelectedIndex(previewQuestions.length - 1);
+    }
+  }, [previewQuestions, previewSelectedIndex]);
 
   return (
     <Box>
@@ -491,7 +508,7 @@ export default function JobsPage() {
                               </IconButton>
                             </span>
                           </Tooltip>
-                          <Tooltip title={busy ? "실행 중" : "OCR 미리보기"}>
+                          <Tooltip title={busy ? "실행 중" : "문항 미리보기"}>
                             <span>
                               <IconButton
                                 size="small"
@@ -594,50 +611,220 @@ export default function JobsPage() {
         open={previewOpen}
         onClose={() => setPreviewOpen(false)}
         fullWidth
-        maxWidth="md"
-        PaperProps={{ sx: { backgroundColor: "#18181A" } }}
+        maxWidth="xl"
+        scroll="paper"
+        slotProps={{
+          paper: {
+            sx: {
+              backgroundColor: "#121416",
+              minHeight: isMobilePreview ? "72vh" : "78vh",
+            },
+          },
+        }}
       >
-        <DialogTitle sx={{ color: "#FFFFFF", borderBottom: "1px solid rgba(231,227,227,0.08)" }}>
-          OCR 미리보기 · {previewTitle}
+        <DialogTitle sx={{ color: "#FFFFFF", borderBottom: "1px solid rgba(231,227,227,0.08)", py: 1.5 }}>
+          <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 1.5 }}>
+            <Box>
+              <Typography variant="subtitle1" sx={{ color: "#FFFFFF", fontWeight: 700 }}>
+                문항 미리보기 · {previewTitle}
+              </Typography>
+              <Typography variant="caption" sx={{ color: "#919497" }}>
+                번호 패턴 기반 분리 + AI 분류 결과 결합
+              </Typography>
+            </Box>
+            {!previewLoading && !previewError && (
+              <Chip
+                size="small"
+                label={`${previewQuestions.length}문항`}
+                sx={{
+                  color: "#7FB3FF",
+                  backgroundColor: "rgba(127,179,255,0.14)",
+                  fontWeight: 600,
+                }}
+              />
+            )}
+          </Box>
         </DialogTitle>
-        <DialogContent sx={{ pt: 2 }}>
+        <DialogContent dividers sx={{ p: 0, borderColor: "rgba(231,227,227,0.08)" }}>
           {previewLoading && <Typography sx={{ color: "#919497" }}>불러오는 중...</Typography>}
           {!previewLoading && previewError && <Alert severity="warning">{previewError}</Alert>}
           {!previewLoading && !previewError && (
             <MathJaxContext config={mathJaxConfig}>
-              {previewPages.map((page) => (
+              <Box
+                sx={{
+                  display: "grid",
+                  gridTemplateColumns: isMobilePreview ? "1fr" : "320px 1fr",
+                  minHeight: isMobilePreview ? "auto" : 560,
+                }}
+              >
                 <Box
-                  key={page.id}
                   sx={{
-                    mb: 2,
-                    p: 2,
-                    border: "1px solid rgba(231,227,227,0.08)",
-                    borderRadius: 1.5,
-                    backgroundColor: "rgba(255,255,255,0.02)",
+                    borderRight: isMobilePreview ? "none" : "1px solid rgba(231,227,227,0.08)",
+                    borderBottom: isMobilePreview ? "1px solid rgba(231,227,227,0.08)" : "none",
+                    maxHeight: isMobilePreview ? 220 : 560,
+                    overflowY: "auto",
+                    p: 1,
                   }}
                 >
-                  <Typography variant="subtitle2" sx={{ color: "#E7E3E3", mb: 1 }}>
-                    페이지 {page.page_no}
-                  </Typography>
-                  <Box
-                    sx={{
-                      color: "#CFCFCF",
-                      whiteSpace: "pre-wrap",
-                      fontFamily: "monospace",
-                      fontSize: 12,
-                      lineHeight: 1.7,
-                    }}
-                  >
-                    <MathJax dynamic>
-                      {(page.extracted_text || page.extracted_latex || "").trim() || "(추출 텍스트 없음)"}
-                    </MathJax>
-                  </Box>
+                  {previewQuestions.map((question, index) => {
+                    const selected = index === previewSelectedIndex;
+                    const snippet = question.statement_text.replace(/\s+/g, " ").trim();
+                    return (
+                      <Button
+                        key={`${question.page_id}-${question.candidate_no}-${index}`}
+                        onClick={() => setPreviewSelectedIndex(index)}
+                        sx={{
+                          width: "100%",
+                          textAlign: "left",
+                          justifyContent: "flex-start",
+                          mb: 0.75,
+                          px: 1.25,
+                          py: 1,
+                          borderRadius: 1.5,
+                          border: "1px solid",
+                          borderColor: selected ? "rgba(127,179,255,0.55)" : "rgba(231,227,227,0.08)",
+                          backgroundColor: selected ? "rgba(127,179,255,0.12)" : "rgba(255,255,255,0.02)",
+                          color: selected ? "#FFFFFF" : "#D3D6D9",
+                          "&:hover": {
+                            borderColor: "rgba(127,179,255,0.65)",
+                            backgroundColor: "rgba(127,179,255,0.1)",
+                          },
+                        }}
+                      >
+                        <Box sx={{ width: "100%" }}>
+                          <Box
+                            sx={{
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "space-between",
+                              gap: 1,
+                              mb: 0.4,
+                            }}
+                          >
+                            <Typography variant="caption" sx={{ color: selected ? "#7FB3FF" : "#A7B5BF", fontWeight: 700 }}>
+                              {question.candidate_key}
+                            </Typography>
+                            {question.has_visual_asset && (
+                              <Chip
+                                size="small"
+                                label="시각요소"
+                                sx={{
+                                  height: 18,
+                                  fontSize: 10,
+                                  color: "#D4A574",
+                                  backgroundColor: "rgba(212,165,116,0.15)",
+                                }}
+                              />
+                            )}
+                          </Box>
+                          <Typography
+                            variant="body2"
+                            sx={{
+                              fontSize: 12,
+                              color: selected ? "#F2F4F6" : "#C1C5C9",
+                              lineHeight: 1.5,
+                              display: "-webkit-box",
+                              WebkitLineClamp: 2,
+                              WebkitBoxOrient: "vertical",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                            }}
+                          >
+                            {snippet || "(본문 없음)"}
+                          </Typography>
+                        </Box>
+                      </Button>
+                    );
+                  })}
                 </Box>
-              ))}
+
+                <Box sx={{ p: { xs: 2, md: 3 }, overflowY: "auto" }}>
+                  {!selectedPreviewQuestion && (
+                    <Typography variant="body2" sx={{ color: "#919497" }}>
+                      선택된 문항이 없습니다.
+                    </Typography>
+                  )}
+                  {selectedPreviewQuestion && (
+                    <>
+                      <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.75, mb: 2 }}>
+                        <Chip
+                          size="small"
+                          label={`페이지 ${selectedPreviewQuestion.page_no}`}
+                          sx={{ color: "#E7E3E3", backgroundColor: "rgba(231,227,227,0.08)" }}
+                        />
+                        <Chip
+                          size="small"
+                          label={`문항 ${selectedPreviewQuestion.candidate_no}`}
+                          sx={{ color: "#E7E3E3", backgroundColor: "rgba(231,227,227,0.08)" }}
+                        />
+                        <Chip
+                          size="small"
+                          label={`분리: ${selectedPreviewQuestion.split_strategy}`}
+                          sx={{ color: "#A7B5BF", backgroundColor: "rgba(167,181,191,0.12)" }}
+                        />
+                        {selectedPreviewQuestion.confidence !== null && (
+                          <Chip
+                            size="small"
+                            label={`신뢰도 ${Number(selectedPreviewQuestion.confidence).toFixed(0)}`}
+                            sx={{ color: "#7FB3FF", backgroundColor: "rgba(127,179,255,0.14)" }}
+                          />
+                        )}
+                        {selectedPreviewQuestion.provider && (
+                          <Chip
+                            size="small"
+                            label={`AI ${selectedPreviewQuestion.provider}`}
+                            sx={{ color: "#7FB3FF", backgroundColor: "rgba(127,179,255,0.14)" }}
+                          />
+                        )}
+                        {selectedPreviewQuestion.asset_types.map((assetType) => (
+                          <Chip
+                            key={`${selectedPreviewQuestion.candidate_key}-${assetType}`}
+                            size="small"
+                            label={assetType}
+                            sx={{ color: "#D4A574", backgroundColor: "rgba(212,165,116,0.14)" }}
+                          />
+                        ))}
+                      </Box>
+
+                      {selectedPreviewQuestion.has_visual_asset && (
+                        <Alert severity="info" sx={{ mb: 2 }}>
+                          그림/그래프/표 가능성이 감지되었습니다. 최종 검수 시 원본 페이지와 함께 확인하세요.
+                        </Alert>
+                      )}
+
+                      <Box
+                        sx={{
+                          p: { xs: 2, md: 3 },
+                          border: "1px solid rgba(231,227,227,0.1)",
+                          borderRadius: 2,
+                          background:
+                            "linear-gradient(180deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.015) 100%)",
+                          minHeight: 360,
+                        }}
+                      >
+                        <Box
+                          sx={{
+                            color: "#F5F7F8",
+                            whiteSpace: "pre-wrap",
+                            fontSize: { xs: 15, md: 17 },
+                            lineHeight: 1.95,
+                            letterSpacing: "0.005em",
+                          }}
+                        >
+                          <MathJax dynamic>{selectedPreviewQuestion.statement_text || "(본문 없음)"}</MathJax>
+                        </Box>
+                      </Box>
+                    </>
+                  )}
+                </Box>
+              </Box>
             </MathJaxContext>
           )}
         </DialogContent>
-        <DialogActions sx={{ borderTop: "1px solid rgba(231,227,227,0.08)" }}>
+        <DialogActions sx={{ borderTop: "1px solid rgba(231,227,227,0.08)", justifyContent: "space-between", px: 2 }}>
+          <Typography variant="caption" sx={{ color: "#6D7880" }}>
+            문항 경계는 번호 패턴 우선, AI 분류 결과가 있으면 해당 분할을 우선합니다.
+          </Typography>
           <Button onClick={() => setPreviewOpen(false)} sx={{ color: "#E7E3E3" }}>
             닫기
           </Button>

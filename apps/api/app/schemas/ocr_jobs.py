@@ -79,6 +79,30 @@ class OCRJobPagesResponse(BaseModel):
     offset: int
 
 
+class OCRQuestionPreviewItem(BaseModel):
+    page_id: UUID
+    page_no: int
+    candidate_no: int
+    candidate_key: str
+    split_strategy: str
+    statement_text: str
+    confidence: Decimal | None = None
+    validation_status: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    has_visual_asset: bool = False
+    asset_types: list[str] = Field(default_factory=list)
+    updated_at: datetime
+
+
+class OCRJobQuestionsResponse(BaseModel):
+    job_id: UUID
+    items: list[OCRQuestionPreviewItem]
+    total: int
+    limit: int
+    offset: int
+
+
 class OCRJobListItem(BaseModel):
     id: UUID
     document_id: UUID

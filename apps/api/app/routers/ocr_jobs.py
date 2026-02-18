@@ -36,9 +36,11 @@ from app.schemas.ocr_jobs import (
     OCRJobMathpixSyncRequest,
     OCRJobMathpixSyncResponse,
     OCRJobPagesResponse,
+    OCRJobQuestionsResponse,
     OCRPagePreviewItem,
+    OCRQuestionPreviewItem,
 )
-from app.services.ai_classifier import classify_candidate, extract_problem_candidates
+from app.services.ai_classifier import classify_candidate, collect_problem_asset_hints, extract_problem_candidates
 from app.services.mathpix_client import (
     extract_mathpix_pages,
     extract_mathpix_pages_from_lines,
@@ -51,6 +53,7 @@ from app.services.mathpix_client import (
 from app.services.s3_storage import create_s3_client, delete_object, generate_presigned_get_url, parse_storage_key
 
 router = APIRouter(prefix="/ocr/jobs", tags=["ocr-jobs"])
+ALLOWED_ASSET_TYPES = {"image", "table", "graph", "other"}
 
 
 def _json_ready(value):
@@ -74,6 +77,74 @@ def _to_decimal(value) -> Decimal:
         return Decimal(str(value))
     except Exception:
         return Decimal("0")
+
+
+def _to_optional_decimal(value) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
+
+
+def _build_question_preview_items_for_page(page: dict) -> list[OCRQuestionPreviewItem]:
+    page_text = (page.get("extracted_text") or page.get("extracted_latex") or "").strip()
+    raw_payload = page.get("raw_payload")
+    raw_payload = raw_payload if isinstance(raw_payload, dict) else {}
+    ai_classification = raw_payload.get("ai_classification")
+    ai_candidates = ai_classification.get("candidates") if isinstance(ai_classification, dict) else None
+    source_candidates = ai_candidates if isinstance(ai_candidates, list) else extract_problem_candidates(page_text)
+
+    items: list[OCRQuestionPreviewItem] = []
+    for index, candidate in enumerate(source_candidates):
+        if not isinstance(candidate, dict):
+            continue
+
+        statement_text = str(candidate.get("statement_text") or "").strip()
+        if not statement_text:
+            continue
+
+        candidate_no_raw = candidate.get("candidate_no")
+        try:
+            candidate_no = int(candidate_no_raw)
+        except Exception:
+            candidate_no = index + 1
+
+        split_strategy = str(candidate.get("split_strategy") or "").strip()
+        if not split_strategy:
+            split_strategy = "ai_classification" if isinstance(ai_candidates, list) else "numbered"
+
+        asset_hints = collect_problem_asset_hints(statement_text, raw_payload)
+        asset_types = sorted(
+            {
+                str(asset.get("asset_type")).strip().lower()
+                for asset in asset_hints
+                if str(asset.get("asset_type")).strip().lower() in ALLOWED_ASSET_TYPES
+            }
+        )
+
+        items.append(
+            OCRQuestionPreviewItem(
+                page_id=page["id"],
+                page_no=page["page_no"],
+                candidate_no=candidate_no,
+                candidate_key=f"P{page['page_no']}-C{candidate_no}",
+                split_strategy=split_strategy,
+                statement_text=statement_text,
+                confidence=_to_optional_decimal(candidate.get("confidence")),
+                validation_status=str(candidate.get("validation_status"))
+                if candidate.get("validation_status") is not None
+                else None,
+                provider=str(candidate.get("provider")) if candidate.get("provider") is not None else None,
+                model=str(candidate.get("model")) if candidate.get("model") is not None else None,
+                has_visual_asset=bool(asset_types),
+                asset_types=asset_types,
+                updated_at=page["updated_at"],
+            )
+        )
+
+    return items
 
 
 def _build_ai_candidate_output(*, candidate: dict, classified: dict) -> AICandidateClassification:
@@ -555,6 +626,49 @@ def list_ocr_job_pages(
     return OCRJobPagesResponse(
         job_id=job_id,
         items=items,
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/{job_id}/questions", response_model=OCRJobQuestionsResponse)
+def list_ocr_job_questions(
+    job_id: UUID,
+    limit: int = Query(default=200, ge=1, le=2000),
+    offset: int = Query(default=0, ge=0),
+) -> OCRJobQuestionsResponse:
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM ocr_jobs WHERE id = %s", (str(job_id),))
+            job = cur.fetchone()
+            if not job:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"OCR job not found: {job_id}",
+                )
+
+            cur.execute(
+                """
+                SELECT id, page_no, extracted_text, extracted_latex, raw_payload, updated_at
+                FROM ocr_pages
+                WHERE job_id = %s
+                ORDER BY page_no
+                """,
+                (str(job_id),),
+            )
+            pages = cur.fetchall()
+
+    all_items: list[OCRQuestionPreviewItem] = []
+    for page in pages:
+        all_items.extend(_build_question_preview_items_for_page(page))
+    all_items.sort(key=lambda item: (item.page_no, item.candidate_no))
+
+    total = len(all_items)
+    sliced = all_items[offset : offset + limit]
+    return OCRJobQuestionsResponse(
+        job_id=job_id,
+        items=sliced,
         total=total,
         limit=limit,
         offset=offset,
@@ -1354,6 +1468,14 @@ def materialize_ocr_job_problems(
                 # so keep source_problem_no NULL unless explicitly curated later.
                 source_problem_no = None
                 source_problem_label = f"P{page_no}-C{candidate_no}"
+                asset_hints = collect_problem_asset_hints(statement_text, raw_payload)
+                asset_types = sorted(
+                    {
+                        str(asset.get("asset_type")).strip().lower()
+                        for asset in asset_hints
+                        if str(asset.get("asset_type")).strip().lower() in ALLOWED_ASSET_TYPES
+                    }
+                )
 
                 metadata = {
                     "needs_review": True,
@@ -1369,6 +1491,10 @@ def materialize_ocr_job_problems(
                         "reason": candidate.get("reason"),
                         "source_category": candidate.get("source_category"),
                         "source_type": candidate.get("source_type"),
+                    },
+                    "visual_assets": {
+                        "detected_count": len(asset_hints),
+                        "types": asset_types,
                     },
                 }
 
@@ -1433,6 +1559,63 @@ def materialize_ocr_job_problems(
                 else:
                     updated_count += 1
                     item_status = "updated"
+
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        DELETE FROM problem_assets
+                        WHERE problem_id = %s
+                          AND COALESCE(metadata #>> '{ingest,source}', '') = 'ocr_asset_hint'
+                        """,
+                        (str(problem_id),),
+                    )
+
+                    for asset_index, asset in enumerate(asset_hints, start=1):
+                        asset_type = str(asset.get("asset_type") or "other").strip().lower()
+                        if asset_type not in ALLOWED_ASSET_TYPES:
+                            asset_type = "other"
+                        bbox = asset.get("bbox")
+                        storage_key = f"ocr-asset://{job_id}/p{page_no}/c{candidate_no}/{asset_type}/{asset_index}"
+                        asset_metadata = {
+                            "needs_review": True,
+                            "ingest": {
+                                "source": "ocr_asset_hint",
+                                "job_id": str(job_id),
+                                "page_no": page_no,
+                                "candidate_no": candidate_no,
+                                "candidate_key": external_problem_key,
+                                "asset_index": asset_index,
+                                "detected_by": asset.get("source"),
+                                "evidence": asset.get("evidence"),
+                            },
+                        }
+                        cur.execute(
+                            """
+                            INSERT INTO problem_assets (
+                                problem_id,
+                                asset_type,
+                                storage_key,
+                                page_no,
+                                bbox,
+                                metadata
+                            )
+                            VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                            ON CONFLICT (problem_id, storage_key) DO UPDATE
+                            SET
+                                asset_type = EXCLUDED.asset_type,
+                                page_no = EXCLUDED.page_no,
+                                bbox = EXCLUDED.bbox,
+                                metadata = COALESCE(problem_assets.metadata, '{}'::jsonb) || EXCLUDED.metadata
+                            """,
+                            (
+                                str(problem_id),
+                                asset_type,
+                                storage_key,
+                                page_no,
+                                Json(_json_ready(bbox)) if isinstance(bbox, dict) else None,
+                                Json(_json_ready(asset_metadata)),
+                            ),
+                        )
 
                 unit_code = candidate.get("unit_code")
                 unit_id = unit_id_by_subject_unit.get((subject_code, unit_code))
