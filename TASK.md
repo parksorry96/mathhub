@@ -118,3 +118,9 @@
 - [x] `S3_ENDPOINT_URL`이 명시된 경우 사용자 지정 엔드포인트 우선 사용 유지
 - [x] 로컬에서 `/storage/s3/presign-upload` URL 호스트가 리전으로 생성되는지 검증
 - [x] 브라우저와 동일한 `OPTIONS` preflight로 CORS 헤더 응답(200) 검증
+
+### 16. Legacy storage_key 오류 가드 및 UX 보완 — `f77c828`
+- [x] Mathpix submit에서 `upload://` legacy 키 감지 시 원인/조치가 포함된 명확한 오류 메시지 반환
+- [x] OCR Job 생성 시 `storage_key`를 `s3://` 또는 `http(s)://`만 허용하도록 검증 추가
+- [x] 작업 목록에서 legacy `storage_key` 작업의 Mathpix 제출 버튼 비활성화 및 툴팁 안내 추가
+- [x] API/프론트 정적 검증 및 실제 엔드포인트 동작 검증 완료
