@@ -58,11 +58,21 @@ export interface OcrJobPagesResponse {
   offset: number;
 }
 
+export interface OcrQuestionAssetPreview {
+  asset_type: string;
+  storage_key: string;
+  preview_url: string | null;
+  page_no: number | null;
+  bbox: Record<string, number> | null;
+}
+
 export interface OcrQuestionPreviewItem {
   page_id: string;
   page_no: number;
   candidate_no: number;
+  candidate_index: number;
   candidate_key: string;
+  external_problem_key: string;
   split_strategy: string;
   statement_text: string;
   confidence: string | null;
@@ -71,6 +81,7 @@ export interface OcrQuestionPreviewItem {
   model: string | null;
   has_visual_asset: boolean;
   asset_types: string[];
+  asset_previews: OcrQuestionAssetPreview[];
   updated_at: string;
 }
 
@@ -131,6 +142,15 @@ export interface OcrJobMaterializeResponse {
   }>;
 }
 
+export interface ProblemAssetItem {
+  id: string;
+  asset_type: string;
+  storage_key: string;
+  preview_url: string | null;
+  page_no: number | null;
+  bbox: Record<string, number> | null;
+}
+
 export interface ProblemListItem {
   id: string;
   ocr_page_id: string | null;
@@ -153,6 +173,7 @@ export interface ProblemListItem {
   ai_reviewed: boolean;
   ai_provider: string | null;
   ai_model: string | null;
+  assets: ProblemAssetItem[];
   is_verified: boolean;
   created_at: string;
   updated_at: string;

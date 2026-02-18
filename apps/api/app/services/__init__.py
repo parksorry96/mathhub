@@ -8,14 +8,18 @@ from app.services.mathpix_client import (
     resolve_provider_job_id,
     submit_mathpix_pdf,
 )
+from app.services.problem_asset_extractor import ExtractedAsset, ProblemAssetExtractor
 from app.services.s3_storage import (
     build_object_key,
     build_storage_key,
     create_s3_client,
+    delete_object,
     ensure_s3_bucket,
     generate_presigned_get_url,
     generate_presigned_put_url,
+    get_object_bytes,
     parse_storage_key,
+    put_object_bytes,
 )
 
 __all__ = [
@@ -29,10 +33,15 @@ __all__ = [
     "map_mathpix_job_status",
     "extract_mathpix_pages",
     "extract_mathpix_pages_from_lines",
+    "ProblemAssetExtractor",
+    "ExtractedAsset",
     "create_s3_client",
     "ensure_s3_bucket",
     "build_object_key",
     "build_storage_key",
+    "delete_object",
+    "get_object_bytes",
+    "put_object_bytes",
     "parse_storage_key",
     "generate_presigned_put_url",
     "generate_presigned_get_url",

@@ -114,3 +114,32 @@ def delete_object(
     key: str,
 ) -> None:
     client.delete_object(Bucket=bucket, Key=key)
+
+
+def get_object_bytes(
+    *,
+    client: BaseClient,
+    bucket: str,
+    key: str,
+) -> bytes:
+    response = client.get_object(Bucket=bucket, Key=key)
+    body = response.get("Body")
+    if body is None:
+        raise ValueError("S3 get_object returned empty body")
+    return body.read()
+
+
+def put_object_bytes(
+    *,
+    client: BaseClient,
+    bucket: str,
+    key: str,
+    body: bytes,
+    content_type: str,
+) -> None:
+    client.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=body,
+        ContentType=content_type,
+    )

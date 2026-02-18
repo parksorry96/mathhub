@@ -135,7 +135,9 @@ function toQuestionPreviewItemsFromPages(pages: OcrPagePreviewItem[]): OcrQuesti
         page_id: page.id,
         page_no: page.page_no,
         candidate_no: candidate.candidate_no,
+        candidate_index: candidate.candidate_index,
         candidate_key: `P${page.page_no}-C${candidate.candidate_no}`,
+        external_problem_key: `OCR:FALLBACK:P${page.page_no}:I${candidate.candidate_index}`,
         split_strategy: candidate.split_strategy,
         statement_text: candidate.statement_text,
         confidence: null,
@@ -144,6 +146,7 @@ function toQuestionPreviewItemsFromPages(pages: OcrPagePreviewItem[]): OcrQuesti
         model: null,
         has_visual_asset: assetTypes.length > 0,
         asset_types: assetTypes,
+        asset_previews: [],
         updated_at: page.updated_at,
       });
     }
@@ -151,7 +154,9 @@ function toQuestionPreviewItemsFromPages(pages: OcrPagePreviewItem[]): OcrQuesti
   return items.sort((a, b) => a.page_no - b.page_no || a.candidate_no - b.candidate_no);
 }
 
-function splitQuestionCandidates(text: string): Array<{ candidate_no: number; statement_text: string; split_strategy: string }> {
+function splitQuestionCandidates(
+  text: string,
+): Array<{ candidate_no: number; candidate_index: number; statement_text: string; split_strategy: string }> {
   const cleaned = text.trim();
   if (!cleaned) return [];
 
@@ -181,10 +186,10 @@ function splitQuestionCandidates(text: string): Array<{ candidate_no: number; st
   }
 
   if (bestMatches.length === 0) {
-    return [{ candidate_no: 1, statement_text: cleaned, split_strategy: "full_page_fallback" }];
+    return [{ candidate_no: 1, candidate_index: 1, statement_text: cleaned, split_strategy: "full_page_fallback" }];
   }
 
-  const candidates: Array<{ candidate_no: number; statement_text: string; split_strategy: string }> = [];
+  const candidates: Array<{ candidate_no: number; candidate_index: number; statement_text: string; split_strategy: string }> = [];
   for (let i = 0; i < bestMatches.length; i += 1) {
     const start = bestMatches[i].index;
     const end = i + 1 < bestMatches.length ? bestMatches[i + 1].index : cleaned.length;
@@ -192,13 +197,14 @@ function splitQuestionCandidates(text: string): Array<{ candidate_no: number; st
     if (!statementText) continue;
     candidates.push({
       candidate_no: bestMatches[i].value,
+      candidate_index: i + 1,
       statement_text: statementText,
       split_strategy: bestStrategy,
     });
   }
   return candidates.length > 0
     ? candidates
-    : [{ candidate_no: 1, statement_text: cleaned, split_strategy: "full_page_fallback" }];
+    : [{ candidate_no: 1, candidate_index: 1, statement_text: cleaned, split_strategy: "full_page_fallback" }];
 }
 
 function isLikelyQuestionSequence(numbers: number[]) {
@@ -927,6 +933,62 @@ export default function JobsPage() {
                         <Alert severity="info" sx={{ mb: 2 }}>
                           그림/그래프/표 가능성이 감지되었습니다. 최종 검수 시 원본 페이지와 함께 확인하세요.
                         </Alert>
+                      )}
+
+                      {selectedPreviewQuestion.asset_previews.length > 0 && (
+                        <Box sx={{ mb: 2 }}>
+                          <Typography variant="caption" sx={{ color: "#9CB3C8", fontWeight: 600 }}>
+                            추출된 시각 자산 ({selectedPreviewQuestion.asset_previews.length})
+                          </Typography>
+                          <Box
+                            sx={{
+                              mt: 1,
+                              display: "grid",
+                              gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))",
+                              gap: 1,
+                            }}
+                          >
+                            {selectedPreviewQuestion.asset_previews.map((asset, idx) => (
+                              <Box
+                                key={`${selectedPreviewQuestion.candidate_key}-${asset.storage_key}-${idx}`}
+                                sx={{
+                                  border: "1px solid rgba(231,227,227,0.12)",
+                                  borderRadius: 1.5,
+                                  overflow: "hidden",
+                                  backgroundColor: "rgba(255,255,255,0.03)",
+                                }}
+                              >
+                                {asset.preview_url ? (
+                                  <Box
+                                    component="img"
+                                    src={asset.preview_url}
+                                    alt={`${asset.asset_type}-${idx + 1}`}
+                                    sx={{ width: "100%", height: 96, objectFit: "cover", display: "block" }}
+                                  />
+                                ) : (
+                                  <Box
+                                    sx={{
+                                      width: "100%",
+                                      height: 96,
+                                      display: "flex",
+                                      alignItems: "center",
+                                      justifyContent: "center",
+                                      color: "#7F8A93",
+                                      fontSize: 12,
+                                    }}
+                                  >
+                                    미리보기 불가
+                                  </Box>
+                                )}
+                                <Box sx={{ p: 0.75 }}>
+                                  <Typography variant="caption" sx={{ color: "#D4A574" }}>
+                                    {asset.asset_type}
+                                  </Typography>
+                                </Box>
+                              </Box>
+                            ))}
+                          </Box>
+                        </Box>
                       )}
 
                       <Box

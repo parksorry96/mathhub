@@ -5,6 +5,15 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 
+class ProblemAssetItem(BaseModel):
+    id: UUID
+    asset_type: str
+    storage_key: str
+    preview_url: str | None = None
+    page_no: int | None = None
+    bbox: dict | None = None
+
+
 class ProblemListItem(BaseModel):
     id: UUID
     ocr_page_id: UUID | None
@@ -27,6 +36,7 @@ class ProblemListItem(BaseModel):
     ai_reviewed: bool
     ai_provider: str | None
     ai_model: str | None
+    assets: list[ProblemAssetItem]
     is_verified: bool
     created_at: datetime
     updated_at: datetime

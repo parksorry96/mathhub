@@ -229,6 +229,62 @@ export default function ReviewPage() {
                 </MathJaxContext>
               </Box>
 
+              {current.assets.length > 0 && (
+                <Box sx={{ mb: 3 }}>
+                  <Typography variant="caption" sx={{ color: "#9CB3C8", fontWeight: 600 }}>
+                    시각 자산 ({current.assets.length})
+                  </Typography>
+                  <Box
+                    sx={{
+                      mt: 1,
+                      display: "grid",
+                      gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))",
+                      gap: 1,
+                    }}
+                  >
+                    {current.assets.map((asset) => (
+                      <Box
+                        key={asset.id}
+                        sx={{
+                          border: "1px solid rgba(231,227,227,0.12)",
+                          borderRadius: 1.5,
+                          overflow: "hidden",
+                          backgroundColor: "rgba(255,255,255,0.03)",
+                        }}
+                      >
+                        {asset.preview_url ? (
+                          <Box
+                            component="img"
+                            src={asset.preview_url}
+                            alt={`${asset.asset_type}-${asset.id}`}
+                            sx={{ width: "100%", height: 90, objectFit: "cover", display: "block" }}
+                          />
+                        ) : (
+                          <Box
+                            sx={{
+                              width: "100%",
+                              height: 90,
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              color: "#7F8A93",
+                              fontSize: 12,
+                            }}
+                          >
+                            미리보기 불가
+                          </Box>
+                        )}
+                        <Box sx={{ p: 0.75 }}>
+                          <Typography variant="caption" sx={{ color: "#D4A574" }}>
+                            {asset.asset_type}
+                          </Typography>
+                        </Box>
+                      </Box>
+                    ))}
+                  </Box>
+                </Box>
+              )}
+
               <Box sx={{ display: "flex", gap: 1.5, justifyContent: "flex-end" }}>
                 <Button
                   variant="outlined"

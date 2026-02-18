@@ -79,11 +79,21 @@ class OCRJobPagesResponse(BaseModel):
     offset: int
 
 
+class OCRQuestionAssetPreview(BaseModel):
+    asset_type: str
+    storage_key: str
+    preview_url: str | None = None
+    page_no: int | None = None
+    bbox: dict | None = None
+
+
 class OCRQuestionPreviewItem(BaseModel):
     page_id: UUID
     page_no: int
     candidate_no: int
+    candidate_index: int
     candidate_key: str
+    external_problem_key: str
     split_strategy: str
     statement_text: str
     confidence: Decimal | None = None
@@ -92,6 +102,7 @@ class OCRQuestionPreviewItem(BaseModel):
     model: str | None = None
     has_visual_asset: bool = False
     asset_types: list[str] = Field(default_factory=list)
+    asset_previews: list[OCRQuestionAssetPreview] = Field(default_factory=list)
     updated_at: datetime
 
 

@@ -211,6 +211,34 @@ export default function ProblemsPage() {
                         >
                           {prob.content || "(본문 없음)"}
                         </Typography>
+                        {prob.assets.length > 0 && (
+                          <Box sx={{ mt: 0.75, display: "flex", alignItems: "center", gap: 0.75 }}>
+                            <Chip
+                              size="small"
+                              label={`시각자산 ${prob.assets.length}`}
+                              sx={{
+                                height: 18,
+                                fontSize: 10,
+                                color: "#D4A574",
+                                backgroundColor: "rgba(212,165,116,0.15)",
+                              }}
+                            />
+                            {prob.assets[0]?.preview_url && (
+                              <Box
+                                component="img"
+                                src={prob.assets[0].preview_url}
+                                alt="asset-preview"
+                                sx={{
+                                  width: 38,
+                                  height: 24,
+                                  borderRadius: 0.75,
+                                  border: "1px solid rgba(231,227,227,0.15)",
+                                  objectFit: "cover",
+                                }}
+                              />
+                            )}
+                          </Box>
+                        )}
                       </TableCell>
                       <TableCell>
                         <Chip

@@ -36,11 +36,13 @@ from app.schemas.ocr_jobs import (
     OCRJobMathpixSyncRequest,
     OCRJobMathpixSyncResponse,
     OCRJobPagesResponse,
+    OCRQuestionAssetPreview,
     OCRJobQuestionsResponse,
     OCRPagePreviewItem,
     OCRQuestionPreviewItem,
 )
 from app.services.ai_classifier import classify_candidate, collect_problem_asset_hints, extract_problem_candidates
+from app.services.problem_asset_extractor import ProblemAssetExtractor
 from app.services.mathpix_client import (
     extract_mathpix_pages,
     extract_mathpix_pages_from_lines,
@@ -50,7 +52,14 @@ from app.services.mathpix_client import (
     resolve_provider_job_id,
     submit_mathpix_pdf,
 )
-from app.services.s3_storage import create_s3_client, delete_object, generate_presigned_get_url, parse_storage_key
+from app.services.s3_storage import (
+    create_s3_client,
+    delete_object,
+    ensure_s3_bucket,
+    generate_presigned_get_url,
+    get_object_bytes,
+    parse_storage_key,
+)
 
 router = APIRouter(prefix="/ocr/jobs", tags=["ocr-jobs"])
 ALLOWED_ASSET_TYPES = {"image", "table", "graph", "other"}
@@ -88,7 +97,73 @@ def _to_optional_decimal(value) -> Decimal | None:
         return None
 
 
-def _build_question_preview_items_for_page(page: dict) -> list[OCRQuestionPreviewItem]:
+def _build_external_problem_key(*, job_id: UUID, page_no: int, candidate_index: int) -> str:
+    return f"OCR:{job_id}:P{page_no}:I{candidate_index}"
+
+
+def _resolve_asset_preview_url(storage_key: str, s3_client) -> str | None:
+    if not storage_key.startswith("s3://") or s3_client is None:
+        return None
+    try:
+        bucket, key = parse_storage_key(storage_key)
+        return generate_presigned_get_url(client=s3_client, bucket=bucket, key=key, expires_in=1800)
+    except Exception:
+        return None
+
+
+def _load_materialized_asset_preview_map(job_id: UUID) -> dict[str, list[OCRQuestionAssetPreview]]:
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    p.external_problem_key,
+                    pa.asset_type::text AS asset_type,
+                    pa.storage_key,
+                    pa.page_no,
+                    pa.bbox
+                FROM problems p
+                JOIN problem_assets pa ON pa.problem_id = p.id
+                WHERE p.external_problem_key LIKE %s
+                ORDER BY pa.created_at ASC
+                """,
+                (f"OCR:{job_id}:%",),
+            )
+            rows = cur.fetchall()
+
+    if not rows:
+        return {}
+
+    try:
+        s3_client = create_s3_client()
+    except Exception:
+        s3_client = None
+
+    mapped: dict[str, list[OCRQuestionAssetPreview]] = {}
+    for row in rows:
+        key = row["external_problem_key"]
+        if not key:
+            continue
+        previews = mapped.setdefault(key, [])
+        storage_key = row["storage_key"]
+        previews.append(
+            OCRQuestionAssetPreview(
+                asset_type=row["asset_type"] or "other",
+                storage_key=storage_key,
+                preview_url=_resolve_asset_preview_url(storage_key, s3_client),
+                page_no=row["page_no"],
+                bbox=row["bbox"] if isinstance(row["bbox"], dict) else None,
+            )
+        )
+    return mapped
+
+
+def _build_question_preview_items_for_page(
+    *,
+    job_id: UUID,
+    page: dict,
+    materialized_asset_map: dict[str, list[OCRQuestionAssetPreview]],
+) -> list[OCRQuestionPreviewItem]:
     page_text = (page.get("extracted_text") or page.get("extracted_latex") or "").strip()
     raw_payload = page.get("raw_payload")
     raw_payload = raw_payload if isinstance(raw_payload, dict) else {}
@@ -123,13 +198,26 @@ def _build_question_preview_items_for_page(page: dict) -> list[OCRQuestionPrevie
                 if str(asset.get("asset_type")).strip().lower() in ALLOWED_ASSET_TYPES
             }
         )
+        candidate_index = index + 1
+        external_problem_key = _build_external_problem_key(
+            job_id=job_id,
+            page_no=page["page_no"],
+            candidate_index=candidate_index,
+        )
+        materialized_asset_previews = list(materialized_asset_map.get(external_problem_key) or [])
+        for preview in materialized_asset_previews:
+            if preview.asset_type not in asset_types:
+                asset_types.append(preview.asset_type)
+        asset_types = sorted(set(asset_types))
 
         items.append(
             OCRQuestionPreviewItem(
                 page_id=page["id"],
                 page_no=page["page_no"],
                 candidate_no=candidate_no,
+                candidate_index=candidate_index,
                 candidate_key=f"P{page['page_no']}-C{candidate_no}",
+                external_problem_key=external_problem_key,
                 split_strategy=split_strategy,
                 statement_text=statement_text,
                 confidence=_to_optional_decimal(candidate.get("confidence")),
@@ -138,8 +226,9 @@ def _build_question_preview_items_for_page(page: dict) -> list[OCRQuestionPrevie
                 else None,
                 provider=str(candidate.get("provider")) if candidate.get("provider") is not None else None,
                 model=str(candidate.get("model")) if candidate.get("model") is not None else None,
-                has_visual_asset=bool(asset_types),
+                has_visual_asset=bool(asset_types) or bool(materialized_asset_previews),
                 asset_types=asset_types,
+                asset_previews=materialized_asset_previews,
                 updated_at=page["updated_at"],
             )
         )
@@ -595,7 +684,14 @@ def list_ocr_job_pages(
 ) -> OCRJobPagesResponse:
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id FROM ocr_jobs WHERE id = %s", (str(job_id),))
+            cur.execute(
+                """
+                SELECT j.id
+                FROM ocr_jobs j
+                WHERE j.id = %s
+                """,
+                (str(job_id),),
+            )
             job = cur.fetchone()
             if not job:
                 raise HTTPException(
@@ -640,7 +736,14 @@ def list_ocr_job_questions(
 ) -> OCRJobQuestionsResponse:
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id FROM ocr_jobs WHERE id = %s", (str(job_id),))
+            cur.execute(
+                """
+                SELECT j.id
+                FROM ocr_jobs j
+                WHERE j.id = %s
+                """,
+                (str(job_id),),
+            )
             job = cur.fetchone()
             if not job:
                 raise HTTPException(
@@ -659,9 +762,17 @@ def list_ocr_job_questions(
             )
             pages = cur.fetchall()
 
+    materialized_asset_map = _load_materialized_asset_preview_map(job_id)
+
     all_items: list[OCRQuestionPreviewItem] = []
     for page in pages:
-        all_items.extend(_build_question_preview_items_for_page(page))
+        all_items.extend(
+            _build_question_preview_items_for_page(
+                job_id=job_id,
+                page=page,
+                materialized_asset_map=materialized_asset_map,
+            )
+        )
     all_items.sort(key=lambda item: (item.page_no, item.candidate_no))
 
     total = len(all_items)
@@ -1048,7 +1159,14 @@ def classify_ocr_job_step(job_id: UUID, payload: OCRJobAIClassifyRequest) -> OCR
 
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id FROM ocr_jobs WHERE id = %s", (str(job_id),))
+            cur.execute(
+                """
+                SELECT j.id
+                FROM ocr_jobs j
+                WHERE j.id = %s
+                """,
+                (str(job_id),),
+            )
             job = cur.fetchone()
             if not job:
                 raise HTTPException(
@@ -1326,13 +1444,22 @@ def materialize_ocr_job_problems(
 
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id FROM ocr_jobs WHERE id = %s", (str(job_id),))
+            cur.execute(
+                """
+                SELECT j.id, d.storage_key AS document_storage_key
+                FROM ocr_jobs j
+                JOIN ocr_documents d ON d.id = j.document_id
+                WHERE j.id = %s
+                """,
+                (str(job_id),),
+            )
             job = cur.fetchone()
             if not job:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"OCR job not found: {job_id}",
                 )
+            document_storage_key = str(job.get("document_storage_key") or "").strip()
 
             if payload.source_id:
                 cur.execute(
@@ -1401,282 +1528,380 @@ def materialize_ocr_job_problems(
                 detail="No OCR pages found for this job",
             )
 
+        asset_extractor = None
+        asset_extractor_error: str | None = None
+        if document_storage_key.startswith("s3://"):
+            try:
+                source_bucket, source_key = parse_storage_key(document_storage_key)
+                s3_client = create_s3_client()
+                source_pdf_bytes = get_object_bytes(
+                    client=s3_client,
+                    bucket=source_bucket,
+                    key=source_key,
+                )
+                try:
+                    target_bucket = ensure_s3_bucket()
+                except Exception:
+                    target_bucket = source_bucket
+
+                asset_extractor = ProblemAssetExtractor(
+                    pdf_bytes=source_pdf_bytes,
+                    s3_client=s3_client,
+                    bucket=target_bucket,
+                    job_id=job_id,
+                )
+                if not asset_extractor.is_available:
+                    asset_extractor_error = "PyMuPDF is unavailable in runtime environment."
+            except Exception as exc:
+                asset_extractor_error = str(exc)
+        else:
+            asset_extractor_error = "document storage_key is not s3://, asset extraction skipped."
+
         inserted_count = 0
         updated_count = 0
         skipped_count = 0
         results: list[MaterializedProblemResult] = []
-
-        for page in pages:
-            page_no = page["page_no"]
-            raw_payload = page.get("raw_payload") or {}
-            ai_classification = raw_payload.get("ai_classification")
-            if not isinstance(ai_classification, dict):
-                continue
-
-            candidates = ai_classification.get("candidates")
-            if not isinstance(candidates, list):
-                continue
-
-            for index, candidate in enumerate(candidates):
-                if not isinstance(candidate, dict):
-                    skipped_count += 1
-                    results.append(
-                        MaterializedProblemResult(
-                            page_no=page_no,
-                            candidate_no=index + 1,
-                            status="skipped",
-                            problem_id=None,
-                            external_problem_key=f"OCR:{job_id}:P{page_no}:I{index + 1}",
-                            reason="candidate payload is not an object",
-                        )
-                    )
+        try:
+            for page in pages:
+                page_no = page["page_no"]
+                raw_payload = page.get("raw_payload") or {}
+                ai_classification = raw_payload.get("ai_classification")
+                if not isinstance(ai_classification, dict):
                     continue
 
-                candidate_no_raw = candidate.get("candidate_no")
-                try:
-                    candidate_no = int(candidate_no_raw)
-                except Exception:
-                    candidate_no = index + 1
-
-                candidate_index = index + 1
-                external_problem_key = f"OCR:{job_id}:P{page_no}:I{candidate_index}"
-                confidence = _to_decimal(candidate.get("confidence"))
-                if confidence < payload.min_confidence:
-                    skipped_count += 1
-                    results.append(
-                        MaterializedProblemResult(
-                            page_no=page_no,
-                            candidate_no=candidate_no,
-                            status="skipped",
-                            problem_id=None,
-                            external_problem_key=external_problem_key,
-                            reason="confidence below threshold",
-                        )
-                    )
+                candidates = ai_classification.get("candidates")
+                if not isinstance(candidates, list):
                     continue
 
-                statement_text = (candidate.get("statement_text") or "").strip()
-                if not statement_text:
-                    skipped_count += 1
-                    results.append(
-                        MaterializedProblemResult(
-                            page_no=page_no,
-                            candidate_no=candidate_no,
-                            status="skipped",
-                            problem_id=None,
-                            external_problem_key=external_problem_key,
-                            reason="empty statement_text",
-                        )
-                    )
-                    continue
-
-                subject_code = candidate.get("subject_code")
-                subject_id = subject_id_by_code.get(subject_code)
-                if subject_id is None:
-                    skipped_count += 1
-                    results.append(
-                        MaterializedProblemResult(
-                            page_no=page_no,
-                            candidate_no=candidate_no,
-                            status="skipped",
-                            problem_id=None,
-                            external_problem_key=external_problem_key,
-                            reason="subject_code is missing or not mapped",
-                        )
-                    )
-                    continue
-
-                point_value = candidate.get("point_value")
-                if point_value not in (2, 3, 4):
-                    point_value = payload.default_point_value
-
-                # OCR candidate numbers are page-local and can collide across pages,
-                # so keep source_problem_no NULL unless explicitly curated later.
-                source_problem_no = None
-                source_problem_label = f"P{page_no}-C{candidate_no}"
-                asset_hints = collect_problem_asset_hints(statement_text, raw_payload)
-                asset_types = sorted(
-                    {
-                        str(asset.get("asset_type")).strip().lower()
-                        for asset in asset_hints
-                        if str(asset.get("asset_type")).strip().lower() in ALLOWED_ASSET_TYPES
-                    }
-                )
-
-                metadata = {
-                    "needs_review": True,
-                    "ingest": {
-                        "source": "ocr_ai_classification",
-                        "job_id": str(job_id),
-                        "page_no": page_no,
-                        "candidate_no": candidate_no,
-                        "confidence": float(confidence),
-                        "validation_status": candidate.get("validation_status"),
-                        "provider": candidate.get("provider"),
-                        "model": candidate.get("model"),
-                        "reason": candidate.get("reason"),
-                        "source_category": candidate.get("source_category"),
-                        "source_type": candidate.get("source_type"),
-                    },
-                    "visual_assets": {
-                        "detected_count": len(asset_hints),
-                        "types": asset_types,
-                    },
-                }
-
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        INSERT INTO problems (
-                            curriculum_version_id,
-                            source_id,
-                            ocr_page_id,
-                            external_problem_key,
-                            primary_subject_id,
-                            response_type,
-                            point_value,
-                            answer_key,
-                            source_problem_no,
-                            source_problem_label,
-                            problem_text_raw,
-                            problem_text_final,
-                            metadata
-                        )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
-                        ON CONFLICT (external_problem_key) DO UPDATE
-                        SET
-                            source_id = COALESCE(EXCLUDED.source_id, problems.source_id),
-                            ocr_page_id = EXCLUDED.ocr_page_id,
-                            primary_subject_id = EXCLUDED.primary_subject_id,
-                            response_type = EXCLUDED.response_type,
-                            point_value = EXCLUDED.point_value,
-                            answer_key = EXCLUDED.answer_key,
-                            source_problem_no = EXCLUDED.source_problem_no,
-                            source_problem_label = EXCLUDED.source_problem_label,
-                            problem_text_raw = EXCLUDED.problem_text_raw,
-                            problem_text_final = EXCLUDED.problem_text_final,
-                            metadata = COALESCE(problems.metadata, '{}'::jsonb) || EXCLUDED.metadata,
-                            updated_at = NOW()
-                        RETURNING id, (xmax = 0) AS inserted
-                        """,
-                        (
-                            str(curriculum_id),
-                            str(payload.source_id) if payload.source_id else None,
-                            str(page["id"]),
-                            external_problem_key,
-                            str(subject_id),
-                            payload.default_response_type,
-                            point_value,
-                            payload.default_answer_key,
-                            source_problem_no,
-                            source_problem_label,
-                            statement_text,
-                            statement_text,
-                            Json(_json_ready(metadata)),
-                        ),
-                    )
-                    problem_row = cur.fetchone()
-
-                problem_id = problem_row["id"]
-                was_inserted = bool(problem_row["inserted"])
-                if was_inserted:
-                    inserted_count += 1
-                    item_status = "inserted"
-                else:
-                    updated_count += 1
-                    item_status = "updated"
-
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        DELETE FROM problem_assets
-                        WHERE problem_id = %s
-                          AND COALESCE(metadata #>> '{ingest,source}', '') = 'ocr_asset_hint'
-                        """,
-                        (str(problem_id),),
-                    )
-
-                    for asset_index, asset in enumerate(asset_hints, start=1):
-                        asset_type = str(asset.get("asset_type") or "other").strip().lower()
-                        if asset_type not in ALLOWED_ASSET_TYPES:
-                            asset_type = "other"
-                        bbox = asset.get("bbox")
-                        storage_key = f"ocr-asset://{job_id}/p{page_no}/c{candidate_no}/{asset_type}/{asset_index}"
-                        asset_metadata = {
-                            "needs_review": True,
-                            "ingest": {
-                                "source": "ocr_asset_hint",
-                                "job_id": str(job_id),
-                                "page_no": page_no,
-                                "candidate_no": candidate_no,
-                                "candidate_key": external_problem_key,
-                                "asset_index": asset_index,
-                                "detected_by": asset.get("source"),
-                                "evidence": asset.get("evidence"),
-                            },
-                        }
-                        cur.execute(
-                            """
-                            INSERT INTO problem_assets (
-                                problem_id,
-                                asset_type,
-                                storage_key,
-                                page_no,
-                                bbox,
-                                metadata
+                for index, candidate in enumerate(candidates):
+                    if not isinstance(candidate, dict):
+                        skipped_count += 1
+                        results.append(
+                            MaterializedProblemResult(
+                                page_no=page_no,
+                                candidate_no=index + 1,
+                                status="skipped",
+                                problem_id=None,
+                                external_problem_key=f"OCR:{job_id}:P{page_no}:I{index + 1}",
+                                reason="candidate payload is not an object",
                             )
-                            VALUES (%s, %s, %s, %s, %s, %s::jsonb)
-                            ON CONFLICT (problem_id, storage_key) DO UPDATE
-                            SET
-                                asset_type = EXCLUDED.asset_type,
-                                page_no = EXCLUDED.page_no,
-                                bbox = EXCLUDED.bbox,
-                                metadata = COALESCE(problem_assets.metadata, '{}'::jsonb) || EXCLUDED.metadata
-                            """,
-                            (
-                                str(problem_id),
-                                asset_type,
-                                storage_key,
-                                page_no,
-                                Json(_json_ready(bbox)) if isinstance(bbox, dict) else None,
-                                Json(_json_ready(asset_metadata)),
-                            ),
                         )
+                        continue
 
-                unit_code = candidate.get("unit_code")
-                unit_id = unit_id_by_subject_unit.get((subject_code, unit_code))
-                if unit_id:
+                    candidate_no_raw = candidate.get("candidate_no")
+                    try:
+                        candidate_no = int(candidate_no_raw)
+                    except Exception:
+                        candidate_no = index + 1
+
+                    candidate_index = index + 1
+                    external_problem_key = _build_external_problem_key(
+                        job_id=job_id,
+                        page_no=page_no,
+                        candidate_index=candidate_index,
+                    )
+                    confidence = _to_decimal(candidate.get("confidence"))
+                    if confidence < payload.min_confidence:
+                        skipped_count += 1
+                        results.append(
+                            MaterializedProblemResult(
+                                page_no=page_no,
+                                candidate_no=candidate_no,
+                                status="skipped",
+                                problem_id=None,
+                                external_problem_key=external_problem_key,
+                                reason="confidence below threshold",
+                            )
+                        )
+                        continue
+
+                    statement_text = (candidate.get("statement_text") or "").strip()
+                    if not statement_text:
+                        skipped_count += 1
+                        results.append(
+                            MaterializedProblemResult(
+                                page_no=page_no,
+                                candidate_no=candidate_no,
+                                status="skipped",
+                                problem_id=None,
+                                external_problem_key=external_problem_key,
+                                reason="empty statement_text",
+                            )
+                        )
+                        continue
+
+                    subject_code = candidate.get("subject_code")
+                    subject_id = subject_id_by_code.get(subject_code)
+                    if subject_id is None:
+                        skipped_count += 1
+                        results.append(
+                            MaterializedProblemResult(
+                                page_no=page_no,
+                                candidate_no=candidate_no,
+                                status="skipped",
+                                problem_id=None,
+                                external_problem_key=external_problem_key,
+                                reason="subject_code is missing or not mapped",
+                            )
+                        )
+                        continue
+
+                    point_value = candidate.get("point_value")
+                    if point_value not in (2, 3, 4):
+                        point_value = payload.default_point_value
+
+                    # OCR candidate numbers are page-local and can collide across pages,
+                    # so keep source_problem_no NULL unless explicitly curated later.
+                    source_problem_no = None
+                    source_problem_label = f"P{page_no}-C{candidate_no}"
+                    asset_hints = collect_problem_asset_hints(statement_text, raw_payload)
+                    asset_types = sorted(
+                        {
+                            str(asset.get("asset_type")).strip().lower()
+                            for asset in asset_hints
+                            if str(asset.get("asset_type")).strip().lower() in ALLOWED_ASSET_TYPES
+                        }
+                    )
+                    extracted_assets = []
+                    if asset_extractor and asset_extractor.is_available and asset_hints:
+                        try:
+                            extracted_assets = asset_extractor.extract_and_upload(
+                                page_no=page_no,
+                                candidate_no=candidate_no,
+                                external_problem_key=external_problem_key,
+                                asset_hints=asset_hints,
+                            )
+                        except Exception as exc:
+                            asset_extractor_error = str(exc)
+                    extracted_asset_storage_keys = [item.storage_key for item in extracted_assets]
+                    extracted_asset_types = sorted({item.asset_type for item in extracted_assets})
+                    for asset_type in extracted_asset_types:
+                        if asset_type not in asset_types:
+                            asset_types.append(asset_type)
+                    asset_types.sort()
+
+                    metadata = {
+                        "needs_review": True,
+                        "ingest": {
+                            "source": "ocr_ai_classification",
+                            "job_id": str(job_id),
+                            "page_no": page_no,
+                            "candidate_no": candidate_no,
+                            "confidence": float(confidence),
+                            "validation_status": candidate.get("validation_status"),
+                            "provider": candidate.get("provider"),
+                            "model": candidate.get("model"),
+                            "reason": candidate.get("reason"),
+                            "source_category": candidate.get("source_category"),
+                            "source_type": candidate.get("source_type"),
+                        },
+                        "visual_assets": {
+                            "detected_count": len(asset_hints),
+                            "stored_count": len(extracted_assets),
+                            "stored_storage_keys": extracted_asset_storage_keys,
+                            "types": asset_types,
+                            "extraction_error": asset_extractor_error,
+                        },
+                    }
+
                     with conn.cursor() as cur:
                         cur.execute(
                             """
-                            UPDATE problem_unit_map
-                            SET is_primary = FALSE
-                            WHERE problem_id = %s
-                              AND is_primary = TRUE
-                              AND unit_id <> %s
+                            INSERT INTO problems (
+                                curriculum_version_id,
+                                source_id,
+                                ocr_page_id,
+                                external_problem_key,
+                                primary_subject_id,
+                                response_type,
+                                point_value,
+                                answer_key,
+                                source_problem_no,
+                                source_problem_label,
+                                problem_text_raw,
+                                problem_text_final,
+                                metadata
+                            )
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                            ON CONFLICT (external_problem_key) DO UPDATE
+                            SET
+                                source_id = COALESCE(EXCLUDED.source_id, problems.source_id),
+                                ocr_page_id = EXCLUDED.ocr_page_id,
+                                primary_subject_id = EXCLUDED.primary_subject_id,
+                                response_type = EXCLUDED.response_type,
+                                point_value = EXCLUDED.point_value,
+                                answer_key = EXCLUDED.answer_key,
+                                source_problem_no = EXCLUDED.source_problem_no,
+                                source_problem_label = EXCLUDED.source_problem_label,
+                                problem_text_raw = EXCLUDED.problem_text_raw,
+                                problem_text_final = EXCLUDED.problem_text_final,
+                                metadata = COALESCE(problems.metadata, '{}'::jsonb) || EXCLUDED.metadata,
+                                updated_at = NOW()
+                            RETURNING id, (xmax = 0) AS inserted
                             """,
-                            (str(problem_id), str(unit_id)),
+                            (
+                                str(curriculum_id),
+                                str(payload.source_id) if payload.source_id else None,
+                                str(page["id"]),
+                                external_problem_key,
+                                str(subject_id),
+                                payload.default_response_type,
+                                point_value,
+                                payload.default_answer_key,
+                                source_problem_no,
+                                source_problem_label,
+                                statement_text,
+                                statement_text,
+                                Json(_json_ready(metadata)),
+                            ),
                         )
+                        problem_row = cur.fetchone()
+
+                    problem_id = problem_row["id"]
+                    was_inserted = bool(problem_row["inserted"])
+                    if was_inserted:
+                        inserted_count += 1
+                        item_status = "inserted"
+                    else:
+                        updated_count += 1
+                        item_status = "updated"
+
+                    with conn.cursor() as cur:
                         cur.execute(
                             """
-                            INSERT INTO problem_unit_map (problem_id, unit_id, is_primary)
-                            VALUES (%s, %s, TRUE)
-                            ON CONFLICT (problem_id, unit_id) DO UPDATE
-                            SET is_primary = EXCLUDED.is_primary
+                            DELETE FROM problem_assets
+                            WHERE problem_id = %s
+                              AND COALESCE(metadata #>> '{ingest,source}', '') = 'ocr_asset_hint'
                             """,
-                            (str(problem_id), str(unit_id)),
+                            (str(problem_id),),
                         )
+                        if extracted_assets:
+                            for asset_index, extracted in enumerate(extracted_assets, start=1):
+                                asset_metadata = {
+                                    "needs_review": True,
+                                    "ingest": {
+                                        "source": "ocr_asset_extract",
+                                        "job_id": str(job_id),
+                                        "page_no": page_no,
+                                        "candidate_no": candidate_no,
+                                        "candidate_key": external_problem_key,
+                                        "asset_index": asset_index,
+                                        **(extracted.metadata or {}),
+                                    },
+                                }
+                                cur.execute(
+                                    """
+                                    INSERT INTO problem_assets (
+                                        problem_id,
+                                        asset_type,
+                                        storage_key,
+                                        page_no,
+                                        bbox,
+                                        metadata
+                                    )
+                                    VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                                    ON CONFLICT (problem_id, storage_key) DO UPDATE
+                                    SET
+                                        asset_type = EXCLUDED.asset_type,
+                                        page_no = EXCLUDED.page_no,
+                                        bbox = EXCLUDED.bbox,
+                                        metadata = COALESCE(problem_assets.metadata, '{}'::jsonb) || EXCLUDED.metadata
+                                    """,
+                                    (
+                                        str(problem_id),
+                                        extracted.asset_type,
+                                        extracted.storage_key,
+                                        extracted.page_no,
+                                        Json(_json_ready(extracted.bbox)) if isinstance(extracted.bbox, dict) else None,
+                                        Json(_json_ready(asset_metadata)),
+                                    ),
+                                )
+                        else:
+                            for asset_index, asset in enumerate(asset_hints, start=1):
+                                asset_type = str(asset.get("asset_type") or "other").strip().lower()
+                                if asset_type not in ALLOWED_ASSET_TYPES:
+                                    asset_type = "other"
+                                bbox = asset.get("bbox")
+                                storage_key = f"ocr-asset://{job_id}/p{page_no}/c{candidate_no}/{asset_type}/{asset_index}"
+                                asset_metadata = {
+                                    "needs_review": True,
+                                    "ingest": {
+                                        "source": "ocr_asset_hint",
+                                        "job_id": str(job_id),
+                                        "page_no": page_no,
+                                        "candidate_no": candidate_no,
+                                        "candidate_key": external_problem_key,
+                                        "asset_index": asset_index,
+                                        "detected_by": asset.get("source"),
+                                        "evidence": asset.get("evidence"),
+                                        "extraction_error": asset_extractor_error,
+                                    },
+                                }
+                                cur.execute(
+                                    """
+                                    INSERT INTO problem_assets (
+                                        problem_id,
+                                        asset_type,
+                                        storage_key,
+                                        page_no,
+                                        bbox,
+                                        metadata
+                                    )
+                                    VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                                    ON CONFLICT (problem_id, storage_key) DO UPDATE
+                                    SET
+                                        asset_type = EXCLUDED.asset_type,
+                                        page_no = EXCLUDED.page_no,
+                                        bbox = EXCLUDED.bbox,
+                                        metadata = COALESCE(problem_assets.metadata, '{}'::jsonb) || EXCLUDED.metadata
+                                    """,
+                                    (
+                                        str(problem_id),
+                                        asset_type,
+                                        storage_key,
+                                        page_no,
+                                        Json(_json_ready(bbox)) if isinstance(bbox, dict) else None,
+                                        Json(_json_ready(asset_metadata)),
+                                    ),
+                                )
 
-                results.append(
-                    MaterializedProblemResult(
-                        page_no=page_no,
-                        candidate_no=candidate_no,
-                        status=item_status,
-                        problem_id=problem_id,
-                        external_problem_key=external_problem_key,
-                        reason=None,
+                    unit_code = candidate.get("unit_code")
+                    unit_id = unit_id_by_subject_unit.get((subject_code, unit_code))
+                    if unit_id:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                """
+                                UPDATE problem_unit_map
+                                SET is_primary = FALSE
+                                WHERE problem_id = %s
+                                  AND is_primary = TRUE
+                                  AND unit_id <> %s
+                                """,
+                                (str(problem_id), str(unit_id)),
+                            )
+                            cur.execute(
+                                """
+                                INSERT INTO problem_unit_map (problem_id, unit_id, is_primary)
+                                VALUES (%s, %s, TRUE)
+                                ON CONFLICT (problem_id, unit_id) DO UPDATE
+                                SET is_primary = EXCLUDED.is_primary
+                                """,
+                                (str(problem_id), str(unit_id)),
+                            )
+
+                    results.append(
+                        MaterializedProblemResult(
+                            page_no=page_no,
+                            candidate_no=candidate_no,
+                            status=item_status,
+                            problem_id=problem_id,
+                            external_problem_key=external_problem_key,
+                            reason=None,
+                        )
                     )
-                )
+        finally:
+            if asset_extractor:
+                asset_extractor.close()
 
         conn.commit()
 

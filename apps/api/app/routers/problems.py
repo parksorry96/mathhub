@@ -3,19 +3,68 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query, status
 from psycopg.types.json import Json
 
+from app.config import get_s3_bucket
 from app.db import get_db_connection
 from app.schemas.problems import (
+    ProblemAssetItem,
     ProblemListItem,
     ProblemListResponse,
     ProblemReviewRequest,
     ProblemReviewResponse,
 )
+from app.services.s3_storage import create_s3_client, generate_presigned_get_url, parse_storage_key
 
 router = APIRouter(prefix="/problems", tags=["problems"])
 
 _REVIEW_STATUS_EXPR = (
     "COALESCE(p.metadata->>'review_status', CASE WHEN p.is_verified THEN 'approved' ELSE 'pending' END)"
 )
+
+
+def _resolve_preview_url(storage_key: str, s3_client) -> str | None:
+    if not storage_key.startswith("s3://") or s3_client is None:
+        return None
+    try:
+        bucket, key = parse_storage_key(storage_key)
+        return generate_presigned_get_url(
+            client=s3_client,
+            bucket=bucket,
+            key=key,
+            expires_in=1800,
+        )
+    except Exception:
+        return None
+
+
+def _build_problem_assets(raw_assets: object, s3_client) -> list[ProblemAssetItem]:
+    if not isinstance(raw_assets, list):
+        return []
+
+    assets: list[ProblemAssetItem] = []
+    for item in raw_assets:
+        if not isinstance(item, dict):
+            continue
+        raw_id = item.get("id")
+        raw_storage_key = item.get("storage_key")
+        if raw_id is None or not isinstance(raw_storage_key, str):
+            continue
+        try:
+            asset_id = UUID(str(raw_id))
+        except Exception:
+            continue
+
+        bbox = item.get("bbox")
+        assets.append(
+            ProblemAssetItem(
+                id=asset_id,
+                asset_type=str(item.get("asset_type") or "other"),
+                storage_key=raw_storage_key,
+                preview_url=_resolve_preview_url(raw_storage_key, s3_client),
+                page_no=int(item["page_no"]) if item.get("page_no") is not None else None,
+                bbox=bbox if isinstance(bbox, dict) else None,
+            )
+        )
+    return assets
 
 
 def _build_problem_filters(
@@ -106,6 +155,7 @@ def list_problems(
                     (COALESCE(p.metadata #>> '{{ingest,source}}', '') = 'ocr_ai_classification') AS ai_reviewed,
                     NULLIF(p.metadata #>> '{{ingest,provider}}', '') AS ai_provider,
                     NULLIF(p.metadata #>> '{{ingest,model}}', '') AS ai_model,
+                    COALESCE(pa.assets, '[]'::jsonb) AS assets,
                     p.is_verified,
                     p.created_at,
                     p.updated_at
@@ -119,6 +169,23 @@ def list_problems(
                 LEFT JOIN ocr_pages op ON op.id = p.ocr_page_id
                 LEFT JOIN ocr_jobs oj ON oj.id = op.job_id
                 LEFT JOIN ocr_documents d ON d.id = oj.document_id
+                LEFT JOIN LATERAL (
+                    SELECT COALESCE(
+                        jsonb_agg(
+                            jsonb_build_object(
+                                'id', pa.id,
+                                'asset_type', pa.asset_type::text,
+                                'storage_key', pa.storage_key,
+                                'page_no', pa.page_no,
+                                'bbox', pa.bbox
+                            )
+                            ORDER BY pa.created_at ASC
+                        ),
+                        '[]'::jsonb
+                    ) AS assets
+                    FROM problem_assets pa
+                    WHERE pa.problem_id = p.id
+                ) pa ON TRUE
                 {where_sql}
                 ORDER BY p.created_at DESC
                 LIMIT %s OFFSET %s
@@ -157,7 +224,16 @@ def list_problems(
         if key in review_counts:
             review_counts[key] = int(row["cnt"])
 
-    items = [ProblemListItem(**row) for row in rows]
+    try:
+        s3_client = create_s3_client() if get_s3_bucket() else None
+    except Exception:
+        s3_client = None
+
+    items: list[ProblemListItem] = []
+    for row in rows:
+        payload = dict(row)
+        payload["assets"] = _build_problem_assets(row.get("assets"), s3_client)
+        items.append(ProblemListItem(**payload))
     return ProblemListResponse(
         items=items,
         total=total,
