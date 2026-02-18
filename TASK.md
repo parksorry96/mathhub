@@ -192,3 +192,11 @@
 - [x] `GET /problems` 응답에 자산 목록/미리보기 URL 포함
 - [x] 작업목록/문제목록/검수 화면에 시각 자산 썸네일 렌더링 추가
 - [x] 검증 완료 (`ruff check`, `python -m compileall`, `pnpm --filter @mathhub/web lint`, `pnpm --filter @mathhub/web build`)
+
+### 27. Mathpix/AI 실시간 상태 반영 강화 — `ce40134`
+- [x] 작업 목록 `submit` 버튼 실행 시 Mathpix 제출 직후 자동 sync 폴링으로 완료까지 추적
+- [x] `sync` 버튼 동작을 1회 호출에서 완료까지 폴링하는 실시간 모드로 변경
+- [x] OCR sync 루프 중 행 상태(`status`, `progress_pct`, `error_message`)를 즉시 갱신
+- [x] AI classify 루프 중 행 상태(`ai_done`, `ai_processed/total`, provider/model)를 즉시 갱신
+- [x] 진행 중 작업이 있으면 2.5초 간격 백그라운드 무소음 polling으로 목록 자동 최신화
+- [x] 검증 완료 (`pnpm --filter @mathhub/web lint`, `pnpm --filter @mathhub/web build`)
