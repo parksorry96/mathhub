@@ -1079,11 +1079,9 @@ def classify_ocr_job_step(job_id: UUID, payload: OCRJobAIClassifyRequest) -> OCR
         candidates_accepted = 0
         api_candidates = 0
         pages_processed = 0
-
-        target_page = None
-        target_candidate = None
-        target_existing_candidates: list[dict] = []
-        target_had_candidates = False
+        max_candidates_per_call = payload.max_candidates_per_call
+        page_states: dict[str, dict] = {}
+        target_candidates: list[tuple[str, dict]] = []
 
         for page in pages:
             page_text = (page.get("extracted_text") or page.get("extracted_latex") or "").strip()
@@ -1115,15 +1113,28 @@ def classify_ocr_job_step(job_id: UUID, payload: OCRJobAIClassifyRequest) -> OCR
                 if existing.get("provider") == "api":
                     api_candidates += 1
 
-            if target_candidate is None:
-                for candidate in page_candidates:
+            page_key = str(page["id"])
+            page_states[page_key] = {
+                "page": page,
+                "candidates": [item for item in existing_list if isinstance(item, dict)],
+                "had_candidates": bool(existing_list),
+                "touched": False,
+            }
+
+            if len(target_candidates) >= max_candidates_per_call:
+                continue
+
+            for candidate in page_candidates:
+                try:
                     candidate_no = int(candidate["candidate_no"])
-                    if candidate_no not in existing_candidate_no:
-                        target_page = page
-                        target_candidate = candidate
-                        target_existing_candidates = [item for item in existing_list if isinstance(item, dict)]
-                        target_had_candidates = bool(existing_list)
-                        break
+                except Exception:
+                    continue
+                if candidate_no in existing_candidate_no:
+                    continue
+                target_candidates.append((page_key, candidate))
+                existing_candidate_no.add(candidate_no)
+                if len(target_candidates) >= max_candidates_per_call:
+                    break
 
         if total_candidates == 0:
             summary_payload = {
@@ -1157,7 +1168,7 @@ def classify_ocr_job_step(job_id: UUID, payload: OCRJobAIClassifyRequest) -> OCR
                 model=model,
             )
 
-        if target_candidate is None or target_page is None:
+        if not target_candidates:
             final_provider = "api" if api_candidates > 0 else "heuristic"
             summary_payload = {
                 "provider": final_provider,
@@ -1190,59 +1201,74 @@ def classify_ocr_job_step(job_id: UUID, payload: OCRJobAIClassifyRequest) -> OCR
                 model=model,
             )
 
-        classified = classify_candidate(
-            statement_text=target_candidate["statement_text"],
-            api_key=api_key,
-            api_base_url=api_base_url,
-            model=model,
-        )
-        candidate_out = _build_ai_candidate_output(candidate=target_candidate, classified=classified)
-
-        updated_candidates: list[dict] = []
-        replaced = False
-        for existing in target_existing_candidates:
-            try:
-                existing_no = int(existing.get("candidate_no"))
-            except Exception:
-                existing_no = None
-            if existing_no == candidate_out.candidate_no:
-                updated_candidates.append(candidate_out.model_dump())
-                replaced = True
-            else:
-                updated_candidates.append(existing)
-        if not replaced:
-            updated_candidates.append(candidate_out.model_dump())
-
-        updated_candidates.sort(key=lambda item: int(item.get("candidate_no", 0)))
-
-        page_ai_payload = {
-            "page_id": str(target_page["id"]),
-            "page_no": target_page["page_no"],
-            "candidate_count": len(updated_candidates),
-            "candidates": updated_candidates,
-        }
-
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE ocr_pages
-                SET
-                    raw_payload = COALESCE(raw_payload, '{}'::jsonb)
-                        || jsonb_build_object('ai_classification', %s::jsonb),
-                    updated_at = NOW()
-                WHERE id = %s
-                """,
-                (Json(_json_ready(page_ai_payload)), str(target_page["id"])),
+        last_page_no: int | None = None
+        last_candidate_no: int | None = None
+        last_candidate_provider: str | None = None
+        for page_key, target_candidate in target_candidates:
+            classified = classify_candidate(
+                statement_text=target_candidate["statement_text"],
+                api_key=api_key,
+                api_base_url=api_base_url,
+                model=model,
             )
+            candidate_out = _build_ai_candidate_output(candidate=target_candidate, classified=classified)
 
-            # Progress summary is stored on job-level response for quick UI checks.
+            state = page_states[page_key]
+            existing_items = state["candidates"]
+            updated_candidates: list[dict] = []
+            replaced = False
+            for existing in existing_items:
+                try:
+                    existing_no = int(existing.get("candidate_no"))
+                except Exception:
+                    existing_no = None
+                if existing_no == candidate_out.candidate_no:
+                    updated_candidates.append(candidate_out.model_dump())
+                    replaced = True
+                else:
+                    updated_candidates.append(existing)
+            if not replaced:
+                updated_candidates.append(candidate_out.model_dump())
+
+            updated_candidates.sort(key=lambda item: int(item.get("candidate_no", 0)))
+            state["candidates"] = updated_candidates
+            state["touched"] = True
+
             candidates_processed += 1
             if candidate_out.confidence >= payload.min_confidence:
                 candidates_accepted += 1
             if candidate_out.provider == "api":
                 api_candidates += 1
-            if not target_had_candidates:
-                pages_processed += 1
+
+            last_page_no = int(state["page"]["page_no"])
+            last_candidate_no = candidate_out.candidate_no
+            last_candidate_provider = candidate_out.provider
+
+        with conn.cursor() as cur:
+            for state in page_states.values():
+                if not state.get("touched"):
+                    continue
+                if not state.get("had_candidates") and state.get("candidates"):
+                    pages_processed += 1
+
+                page = state["page"]
+                page_ai_payload = {
+                    "page_id": str(page["id"]),
+                    "page_no": page["page_no"],
+                    "candidate_count": len(state["candidates"]),
+                    "candidates": state["candidates"],
+                }
+                cur.execute(
+                    """
+                    UPDATE ocr_pages
+                    SET
+                        raw_payload = COALESCE(raw_payload, '{}'::jsonb)
+                            || jsonb_build_object('ai_classification', %s::jsonb),
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (Json(_json_ready(page_ai_payload)), str(page["id"])),
+                )
 
             final_provider = "api" if api_candidates > 0 else "heuristic"
             done = candidates_processed >= total_candidates
@@ -1269,15 +1295,15 @@ def classify_ocr_job_step(job_id: UUID, payload: OCRJobAIClassifyRequest) -> OCR
     return OCRJobAIClassifyStepResponse(
         job_id=job_id,
         done=done,
-        processed_in_call=1,
+        processed_in_call=len(target_candidates),
         total_candidates=total_candidates,
         candidates_processed=candidates_processed,
         candidates_accepted=candidates_accepted,
         provider=final_provider,
         model=model,
-        current_page_no=target_page["page_no"],
-        current_candidate_no=candidate_out.candidate_no,
-        current_candidate_provider=candidate_out.provider,
+        current_page_no=last_page_no,
+        current_candidate_no=last_candidate_no,
+        current_candidate_provider=last_candidate_provider,
     )
 
 

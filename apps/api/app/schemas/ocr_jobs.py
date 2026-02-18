@@ -140,6 +140,7 @@ class OCRJobAIClassifyRequest(BaseModel):
     model: str | None = None
     max_pages: int = Field(default=20, ge=1, le=1000)
     min_confidence: Decimal = Field(default=0, ge=0, le=100)
+    max_candidates_per_call: int = Field(default=5, ge=1, le=50)
 
 
 class AICandidateClassification(BaseModel):

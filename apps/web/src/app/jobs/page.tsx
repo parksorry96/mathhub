@@ -273,7 +273,11 @@ export default function JobsPage() {
     let attempts = 0;
     const maxAttempts = 3000;
     while (attempts < maxAttempts) {
-      const step = await classifyOcrJobStep(job.id, { max_pages: 50, min_confidence: 0 });
+      const step = await classifyOcrJobStep(job.id, {
+        max_pages: 50,
+        min_confidence: 0,
+        max_candidates_per_call: 8,
+      });
       latest = step;
       if (!step.done) {
         const at =
