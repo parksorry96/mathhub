@@ -112,3 +112,9 @@
 - [x] 환경변수 빈 문자열을 `None`으로 정규화하도록 `config` getter 공통화
 - [x] `S3_ENDPOINT_URL=` 빈값일 때 boto3 `Invalid endpoint` 오류 해결
 - [x] 의존성 반영 (`apps/api/pyproject.toml`, `apps/api/requirements.txt`)
+
+### 15. S3 Presigned URL CORS 호환 엔드포인트 보정 — `f9952cb`
+- [x] presigned URL 기본 호스트를 글로벌(`s3.amazonaws.com`)에서 리전 엔드포인트(`s3.<region>.amazonaws.com`)로 보정
+- [x] `S3_ENDPOINT_URL`이 명시된 경우 사용자 지정 엔드포인트 우선 사용 유지
+- [x] 로컬에서 `/storage/s3/presign-upload` URL 호스트가 리전으로 생성되는지 검증
+- [x] 브라우저와 동일한 `OPTIONS` preflight로 CORS 헤더 응답(200) 검증
