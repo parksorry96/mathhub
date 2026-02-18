@@ -41,11 +41,13 @@ import type {
   OcrJobAiClassifyStepResponse,
   OcrJobListItem,
   OcrJobMathpixSyncResponse,
+  OcrPagePreviewItem,
   OcrQuestionPreviewItem,
 } from "@/lib/api";
 import {
   classifyOcrJobStep,
   deleteOcrJob,
+  listOcrJobPages,
   listOcrJobQuestions,
   listOcrJobs,
   materializeProblems,
@@ -70,6 +72,19 @@ const mathJaxConfig = {
     displayMath: [["\\[", "\\]"]],
   },
 };
+
+const QUESTION_SPLIT_PATTERNS: Array<{ strategy: string; pattern: RegExp }> = [
+  { strategy: "numbered", pattern: /^\s*(\d{1,2})\s*[\.)]\s+/gm },
+  { strategy: "bracketed", pattern: /^\s*\[(\d{1,2})\]\s+/gm },
+  { strategy: "question_label", pattern: /^\s*문항\s*(\d{1,2})\s*(?:번)?\s*[:.)]?\s*/gm },
+  { strategy: "number_with_beon", pattern: /^\s*(\d{1,2})\s*번\s+/gm },
+];
+
+const VISUAL_HINT_PATTERNS: Array<{ assetType: string; pattern: RegExp }> = [
+  { assetType: "graph", pattern: /(그래프|좌표평면|plot|graph|chart|곡선)/i },
+  { assetType: "table", pattern: /(도수분포표|표|table|tabular)/i },
+  { assetType: "image", pattern: /(그림|도형|diagram|figure|image|사진)/i },
+];
 
 function formatDate(dateText: string) {
   return new Date(dateText).toLocaleString("ko-KR", {
@@ -103,6 +118,107 @@ function isMathpixSubmitSourceSupported(storageKey: string) {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function toQuestionPreviewItemsFromPages(pages: OcrPagePreviewItem[]): OcrQuestionPreviewItem[] {
+  const items: OcrQuestionPreviewItem[] = [];
+  for (const page of pages) {
+    const pageText = (page.extracted_text || page.extracted_latex || "").trim();
+    if (!pageText) {
+      continue;
+    }
+
+    const candidates = splitQuestionCandidates(pageText);
+    for (const candidate of candidates) {
+      const assetTypes = detectVisualAssetTypes(candidate.statement_text);
+      items.push({
+        page_id: page.id,
+        page_no: page.page_no,
+        candidate_no: candidate.candidate_no,
+        candidate_key: `P${page.page_no}-C${candidate.candidate_no}`,
+        split_strategy: candidate.split_strategy,
+        statement_text: candidate.statement_text,
+        confidence: null,
+        validation_status: null,
+        provider: null,
+        model: null,
+        has_visual_asset: assetTypes.length > 0,
+        asset_types: assetTypes,
+        updated_at: page.updated_at,
+      });
+    }
+  }
+  return items.sort((a, b) => a.page_no - b.page_no || a.candidate_no - b.candidate_no);
+}
+
+function splitQuestionCandidates(text: string): Array<{ candidate_no: number; statement_text: string; split_strategy: string }> {
+  const cleaned = text.trim();
+  if (!cleaned) return [];
+
+  let bestStrategy = "full_page_fallback";
+  let bestMatches: Array<{ index: number; value: number }> = [];
+  let bestScore = -1;
+
+  for (const entry of QUESTION_SPLIT_PATTERNS) {
+    const matches = Array.from(cleaned.matchAll(entry.pattern))
+      .map((m) => {
+        const idx = m.index;
+        const raw = m[1];
+        const parsed = Number(raw);
+        if (idx === undefined || !Number.isFinite(parsed)) return null;
+        return { index: idx, value: parsed };
+      })
+      .filter((m): m is { index: number; value: number } => m !== null);
+    if (matches.length === 0) continue;
+
+    const sequenceBonus = isLikelyQuestionSequence(matches.map((m) => m.value)) ? 2 : 0;
+    const score = matches.length + sequenceBonus;
+    if (score > bestScore) {
+      bestScore = score;
+      bestMatches = matches;
+      bestStrategy = entry.strategy;
+    }
+  }
+
+  if (bestMatches.length === 0) {
+    return [{ candidate_no: 1, statement_text: cleaned, split_strategy: "full_page_fallback" }];
+  }
+
+  const candidates: Array<{ candidate_no: number; statement_text: string; split_strategy: string }> = [];
+  for (let i = 0; i < bestMatches.length; i += 1) {
+    const start = bestMatches[i].index;
+    const end = i + 1 < bestMatches.length ? bestMatches[i + 1].index : cleaned.length;
+    const statementText = cleaned.slice(start, end).trim();
+    if (!statementText) continue;
+    candidates.push({
+      candidate_no: bestMatches[i].value,
+      statement_text: statementText,
+      split_strategy: bestStrategy,
+    });
+  }
+  return candidates.length > 0
+    ? candidates
+    : [{ candidate_no: 1, statement_text: cleaned, split_strategy: "full_page_fallback" }];
+}
+
+function isLikelyQuestionSequence(numbers: number[]) {
+  if (numbers.length <= 1) return false;
+  let increasing = 0;
+  for (let i = 1; i < numbers.length; i += 1) {
+    const diff = numbers[i] - numbers[i - 1];
+    if (diff > 0 && diff <= 3) increasing += 1;
+  }
+  return increasing >= Math.max(1, numbers.length - 2);
+}
+
+function detectVisualAssetTypes(statementText: string): string[] {
+  const detected = new Set<string>();
+  for (const hint of VISUAL_HINT_PATTERNS) {
+    if (hint.pattern.test(statementText)) {
+      detected.add(hint.assetType);
+    }
+  }
+  return Array.from(detected).sort();
 }
 
 export default function JobsPage() {
@@ -288,10 +404,27 @@ export default function JobsPage() {
     setPreviewError(null);
     setPreviewLoading(true);
     try {
-      const res = await listOcrJobQuestions(job.id, { limit: 1000, offset: 0 });
-      setPreviewQuestions(res.items);
-      if (res.items.length === 0) {
-        setPreviewError("문항 단위 미리보기가 없습니다. OCR 동기화를 먼저 실행하세요.");
+      try {
+        const res = await listOcrJobQuestions(job.id, { limit: 1000, offset: 0 });
+        setPreviewQuestions(res.items);
+        if (res.items.length === 0) {
+          setPreviewError("문항 단위 미리보기가 없습니다. OCR 동기화를 먼저 실행하세요.");
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "";
+        const isQuestionsApiUnavailable =
+          message.includes("404") || message.toLowerCase().includes("not found");
+        if (!isQuestionsApiUnavailable) {
+          throw err;
+        }
+        const pageRes = await listOcrJobPages(job.id, { limit: 50, offset: 0 });
+        const fallbackItems = toQuestionPreviewItemsFromPages(pageRes.items);
+        setPreviewQuestions(fallbackItems);
+        if (fallbackItems.length === 0) {
+          setPreviewError("문항 단위 미리보기가 없습니다. OCR 동기화를 먼저 실행하세요.");
+        } else {
+          setNotice(`${job.original_filename}: 구버전 API 감지, 페이지 기반 문항 분할로 미리보기를 표시했습니다.`);
+        }
       }
     } catch (err) {
       setPreviewError(err instanceof Error ? err.message : "문항 미리보기를 불러오지 못했습니다.");
