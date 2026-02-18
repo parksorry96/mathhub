@@ -157,6 +157,10 @@ class OCRJobAIClassifyRequest(BaseModel):
 class AICandidateClassification(BaseModel):
     candidate_no: int
     statement_text: str
+    split_strategy: str | None = None
+    bbox: dict | None = None
+    layout_column: int | None = None
+    layout_mode: str | None = None
     subject_code: str | None
     unit_code: str | None
     point_value: int | None

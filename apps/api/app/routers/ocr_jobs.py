@@ -169,7 +169,11 @@ def _build_question_preview_items_for_page(
     raw_payload = raw_payload if isinstance(raw_payload, dict) else {}
     ai_classification = raw_payload.get("ai_classification")
     ai_candidates = ai_classification.get("candidates") if isinstance(ai_classification, dict) else None
-    source_candidates = ai_candidates if isinstance(ai_candidates, list) else extract_problem_candidates(page_text)
+    source_candidates = (
+        ai_candidates
+        if isinstance(ai_candidates, list)
+        else extract_problem_candidates(page_text, raw_payload if isinstance(raw_payload, dict) else None)
+    )
 
     items: list[OCRQuestionPreviewItem] = []
     for index, candidate in enumerate(source_candidates):
@@ -190,7 +194,11 @@ def _build_question_preview_items_for_page(
         if not split_strategy:
             split_strategy = "ai_classification" if isinstance(ai_candidates, list) else "numbered"
 
-        asset_hints = collect_problem_asset_hints(statement_text, raw_payload)
+        asset_hints = collect_problem_asset_hints(
+            statement_text,
+            raw_payload,
+            candidate_bbox=candidate.get("bbox") if isinstance(candidate.get("bbox"), dict) else None,
+        )
         asset_types = sorted(
             {
                 str(asset.get("asset_type")).strip().lower()
@@ -240,6 +248,10 @@ def _build_ai_candidate_output(*, candidate: dict, classified: dict) -> AICandid
     return AICandidateClassification(
         candidate_no=int(candidate["candidate_no"]),
         statement_text=candidate["statement_text"],
+        split_strategy=str(candidate.get("split_strategy")) if candidate.get("split_strategy") is not None else None,
+        bbox=candidate.get("bbox") if isinstance(candidate.get("bbox"), dict) else None,
+        layout_column=int(candidate.get("layout_column")) if candidate.get("layout_column") is not None else None,
+        layout_mode=str(candidate.get("layout_mode")) if candidate.get("layout_mode") is not None else None,
         subject_code=classified["subject_code"],
         unit_code=classified["unit_code"],
         point_value=classified["point_value"],
@@ -1075,7 +1087,8 @@ def classify_ocr_job(job_id: UUID, payload: OCRJobAIClassifyRequest) -> OCRJobAI
 
         for page in pages:
             page_text = (page.get("extracted_text") or page.get("extracted_latex") or "").strip()
-            candidates = extract_problem_candidates(page_text)
+            raw_payload = page.get("raw_payload")
+            candidates = extract_problem_candidates(page_text, raw_payload if isinstance(raw_payload, dict) else None)
             classified_candidates: list[AICandidateClassification] = []
 
             for candidate in candidates:
@@ -1203,10 +1216,14 @@ def classify_ocr_job_step(job_id: UUID, payload: OCRJobAIClassifyRequest) -> OCR
 
         for page in pages:
             page_text = (page.get("extracted_text") or page.get("extracted_latex") or "").strip()
-            page_candidates = extract_problem_candidates(page_text)
+            raw_payload = page.get("raw_payload")
+            page_candidates = extract_problem_candidates(
+                page_text,
+                raw_payload if isinstance(raw_payload, dict) else None,
+            )
             total_candidates += len(page_candidates)
 
-            raw_payload = page.get("raw_payload") or {}
+            raw_payload = raw_payload if isinstance(raw_payload, dict) else {}
             ai_classification = raw_payload.get("ai_classification") if isinstance(raw_payload, dict) else None
             existing_candidates = ai_classification.get("candidates") if isinstance(ai_classification, dict) else None
             existing_list = existing_candidates if isinstance(existing_candidates, list) else []
@@ -1513,7 +1530,7 @@ def materialize_ocr_job_problems(
 
             cur.execute(
                 """
-                SELECT id, page_no, raw_payload
+                SELECT id, page_no, extracted_text, extracted_latex, raw_payload
                 FROM ocr_pages
                 WHERE job_id = %s
                 ORDER BY page_no
@@ -1572,6 +1589,17 @@ def materialize_ocr_job_problems(
                 candidates = ai_classification.get("candidates")
                 if not isinstance(candidates, list):
                     continue
+
+                fallback_layout_by_no: dict[int, dict] = {}
+                page_text = (page.get("extracted_text") or page.get("extracted_latex") or "").strip()
+                for derived in extract_problem_candidates(page_text, raw_payload if isinstance(raw_payload, dict) else None):
+                    if not isinstance(derived, dict):
+                        continue
+                    try:
+                        derived_no = int(derived.get("candidate_no"))
+                    except Exception:
+                        continue
+                    fallback_layout_by_no[derived_no] = derived
 
                 for index, candidate in enumerate(candidates):
                     if not isinstance(candidate, dict):
@@ -1654,7 +1682,16 @@ def materialize_ocr_job_problems(
                     # so keep source_problem_no NULL unless explicitly curated later.
                     source_problem_no = None
                     source_problem_label = f"P{page_no}-C{candidate_no}"
-                    asset_hints = collect_problem_asset_hints(statement_text, raw_payload)
+                    candidate_bbox = candidate.get("bbox") if isinstance(candidate.get("bbox"), dict) else None
+                    if candidate_bbox is None:
+                        fallback_candidate = fallback_layout_by_no.get(candidate_no)
+                        if isinstance(fallback_candidate, dict) and isinstance(fallback_candidate.get("bbox"), dict):
+                            candidate_bbox = fallback_candidate.get("bbox")
+                    asset_hints = collect_problem_asset_hints(
+                        statement_text,
+                        raw_payload,
+                        candidate_bbox=candidate_bbox,
+                    )
                     asset_types = sorted(
                         {
                             str(asset.get("asset_type")).strip().lower()

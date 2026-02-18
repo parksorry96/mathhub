@@ -38,7 +38,12 @@ PAYLOAD_ASSET_TOKENS: dict[str, tuple[str, ...]] = {
 }
 
 
-def extract_problem_candidates(text: str) -> list[dict]:
+def extract_problem_candidates(text: str, page_raw_payload: dict | None = None) -> list[dict]:
+    if isinstance(page_raw_payload, dict):
+        structured = _extract_problem_candidates_from_layout(page_raw_payload)
+        if structured:
+            return structured
+
     cleaned = text.strip()
     if not cleaned:
         return []
@@ -109,7 +114,12 @@ def _is_likely_problem_sequence(numbers: list[int]) -> bool:
     return increasing >= max(1, len(numbers) - 2)
 
 
-def collect_problem_asset_hints(statement_text: str, page_raw_payload: dict | None = None) -> list[dict]:
+def collect_problem_asset_hints(
+    statement_text: str,
+    page_raw_payload: dict | None = None,
+    *,
+    candidate_bbox: dict | None = None,
+) -> list[dict]:
     hints: list[dict] = []
     normalized = statement_text.strip().lower()
 
@@ -127,8 +137,28 @@ def collect_problem_asset_hints(statement_text: str, page_raw_payload: dict | No
                 )
 
     if isinstance(page_raw_payload, dict):
-        hints.extend(_collect_payload_asset_hints(page_raw_payload))
-        hints.extend(_collect_payload_text_hints(page_raw_payload))
+        payload_hints = _collect_payload_asset_hints(page_raw_payload)
+        if isinstance(candidate_bbox, dict):
+            payload_hints = _filter_asset_hints_by_candidate_bbox(payload_hints, candidate_bbox)
+        hints.extend(payload_hints)
+        if candidate_bbox is None:
+            hints.extend(_collect_payload_text_hints(page_raw_payload))
+
+    # When OCR text strongly suggests a graph but payload lacks explicit graph nodes,
+    # fallback to candidate bbox so extraction can still crop the local question area.
+    if (
+        isinstance(candidate_bbox, dict)
+        and any(keyword.lower() in normalized for keyword in TEXT_ASSET_KEYWORDS["graph"])
+        and not any(str(item.get("asset_type")) == "graph" for item in hints)
+    ):
+        hints.append(
+            {
+                "asset_type": "graph",
+                "source": "statement_text_bbox_fallback",
+                "bbox": candidate_bbox,
+                "evidence": ["keyword_graph"],
+            }
+        )
 
     return _dedupe_asset_hints(hints)
 
@@ -209,50 +239,30 @@ def _infer_asset_type_from_node(node: dict) -> str | None:
 
 
 def _extract_bbox(node: dict) -> dict | None:
-    bbox_value = node.get("bbox")
-    if isinstance(bbox_value, dict):
-        return bbox_value
-    if isinstance(bbox_value, list) and len(bbox_value) == 4:
-        try:
-            return {
-                "x1": float(bbox_value[0]),
-                "y1": float(bbox_value[1]),
-                "x2": float(bbox_value[2]),
-                "y2": float(bbox_value[3]),
-            }
-        except Exception:
-            return None
+    for key in ("bbox", "cnt"):
+        xyxy = _to_bbox_xyxy(node.get(key))
+        if xyxy:
+            return _bbox_dict_from_xyxy(xyxy)
 
-    left = node.get("left")
-    top = node.get("top")
-    right = node.get("right")
-    bottom = node.get("bottom")
-    if all(value is not None for value in (left, top, right, bottom)):
-        try:
-            return {
-                "left": float(left),
-                "top": float(top),
-                "right": float(right),
-                "bottom": float(bottom),
-            }
-        except Exception:
-            return None
+    region = node.get("region")
+    if isinstance(region, dict):
+        width = region.get("width")
+        height = region.get("height")
+        top_left_x = region.get("top_left_x")
+        top_left_y = region.get("top_left_y")
+        if all(value is not None for value in (width, height, top_left_x, top_left_y)):
+            try:
+                x1 = float(top_left_x)
+                y1 = float(top_left_y)
+                x2 = x1 + float(width)
+                y2 = y1 + float(height)
+                return _bbox_dict_from_xyxy((x1, y1, x2, y2))
+            except Exception:
+                pass
 
-    x = node.get("x")
-    y = node.get("y")
-    width = node.get("w") or node.get("width")
-    height = node.get("h") or node.get("height")
-    if all(value is not None for value in (x, y, width, height)):
-        try:
-            return {
-                "x": float(x),
-                "y": float(y),
-                "w": float(width),
-                "h": float(height),
-            }
-        except Exception:
-            return None
-
+    xyxy = _to_bbox_xyxy(node)
+    if xyxy:
+        return _bbox_dict_from_xyxy(xyxy)
     return None
 
 
@@ -281,6 +291,357 @@ def _dedupe_asset_hints(hints: list[dict]) -> list[dict]:
             }
         )
     return deduped
+
+
+def _extract_problem_candidates_from_layout(payload: dict) -> list[dict]:
+    lines_raw = payload.get("lines")
+    if not isinstance(lines_raw, list):
+        return []
+
+    nodes = [item for item in lines_raw if isinstance(item, dict)]
+    if len(nodes) < 3:
+        return []
+
+    node_by_id = {str(node.get("id")): node for node in nodes if node.get("id")}
+    root_candidates: list[dict] = []
+    for node in nodes:
+        if str(node.get("type") or "").strip().lower() != "column":
+            continue
+        children = node.get("children_ids")
+        if not isinstance(children, list) or not children:
+            continue
+
+        root_bbox = _extract_bbox(node)
+        if not root_bbox:
+            continue
+
+        descendants = [node, *_collect_descendants(node, node_by_id)]
+        statement_text = _build_statement_text(descendants)
+        candidate_no = _infer_candidate_no(descendants)
+        has_choice_block = any(
+            str(item.get("type") or "").strip().lower() == "multiple_choice_block"
+            for item in descendants
+            if isinstance(item, dict)
+        )
+        if not statement_text and not has_choice_block:
+            continue
+
+        root_candidates.append(
+            {
+                "candidate_no": candidate_no,
+                "statement_text": statement_text,
+                "bbox": root_bbox,
+                "split_strategy": "layout_columns",
+            }
+        )
+
+    if not root_candidates:
+        return []
+
+    page_width = _resolve_page_width(payload, root_candidates)
+    layout_mode, split_x = _detect_layout_mode(root_candidates, page_width)
+    ordered = sorted(
+        root_candidates,
+        key=lambda item: _candidate_layout_sort_key(item, layout_mode=layout_mode, split_x=split_x),
+    )
+
+    used_candidate_no: set[int] = set()
+    finalized: list[dict] = []
+    for index, item in enumerate(ordered, start=1):
+        bbox = _extract_bbox(item) if not isinstance(item.get("bbox"), dict) else item.get("bbox")
+        if not isinstance(bbox, dict):
+            continue
+        xyxy = _to_bbox_xyxy(bbox)
+        if not xyxy:
+            continue
+        bbox = _bbox_dict_from_xyxy(xyxy)
+        x1, _, x2, _ = xyxy
+        center_x = (x1 + x2) / 2.0
+
+        candidate_no = item.get("candidate_no")
+        if not isinstance(candidate_no, int) or candidate_no <= 0 or candidate_no in used_candidate_no:
+            candidate_no = index
+            while candidate_no in used_candidate_no:
+                candidate_no += 1
+        used_candidate_no.add(candidate_no)
+
+        layout_column = 1
+        if layout_mode == "two_column":
+            layout_column = 1 if center_x <= split_x else 2
+
+        split_strategy = "layout_columns_two" if layout_mode == "two_column" else "layout_columns_single"
+        statement_text = str(item.get("statement_text") or "").strip()
+        if not statement_text:
+            statement_text = f"{candidate_no}번 문항"
+
+        finalized.append(
+            {
+                "candidate_no": candidate_no,
+                "statement_text": statement_text,
+                "split_strategy": split_strategy,
+                "bbox": bbox,
+                "layout_column": layout_column,
+                "layout_mode": layout_mode,
+            }
+        )
+
+    return finalized
+
+
+def _collect_descendants(root: dict, node_by_id: dict[str, dict]) -> list[dict]:
+    descendants: list[dict] = []
+    queue = [str(item) for item in (root.get("children_ids") or []) if item]
+    seen: set[str] = set()
+    while queue:
+        current_id = queue.pop(0)
+        if current_id in seen:
+            continue
+        seen.add(current_id)
+        node = node_by_id.get(current_id)
+        if not isinstance(node, dict):
+            continue
+        descendants.append(node)
+        children = node.get("children_ids")
+        if isinstance(children, list):
+            queue.extend(str(item) for item in children if item)
+    return descendants
+
+
+def _extract_node_text(node: dict) -> str:
+    for key in ("text", "text_display"):
+        value = node.get(key)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped:
+                return stripped
+
+    conversion_output = node.get("conversion_output")
+    if isinstance(conversion_output, str):
+        stripped = conversion_output.strip()
+        if stripped:
+            return stripped
+    if isinstance(conversion_output, dict):
+        for key in ("text", "markdown", "latex_styled", "latex", "value"):
+            value = conversion_output.get(key)
+            if isinstance(value, str):
+                stripped = value.strip()
+                if stripped:
+                    return stripped
+    return ""
+
+
+def _build_statement_text(nodes: list[dict]) -> str:
+    rows: list[tuple[float, float, str]] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        node_type = str(node.get("type") or "").strip().lower()
+        if node_type in {"page_info", "column"}:
+            continue
+        text = _extract_node_text(node)
+        if not text:
+            continue
+        bbox = _extract_bbox(node)
+        xyxy = _to_bbox_xyxy(bbox)
+        if xyxy:
+            x1, y1, _, _ = xyxy
+        else:
+            x1, y1 = (0.0, 0.0)
+        rows.append((y1, x1, text))
+
+    if not rows:
+        return ""
+    rows.sort(key=lambda item: (item[0], item[1]))
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for _, _, text in rows:
+        normalized = re.sub(r"\s+", " ", text).strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(text.strip())
+    return "\n".join(deduped).strip()
+
+
+def _infer_candidate_no(nodes: list[dict]) -> int | None:
+    rows: list[tuple[float, float, str]] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        text = _extract_node_text(node)
+        if not text:
+            continue
+        bbox = _extract_bbox(node)
+        xyxy = _to_bbox_xyxy(bbox)
+        if xyxy:
+            x1, y1, _, _ = xyxy
+        else:
+            x1, y1 = (0.0, 0.0)
+        rows.append((y1, x1, text))
+    rows.sort(key=lambda item: (item[0], item[1]))
+    for _, _, text in rows[:8]:
+        match = re.match(r"^\s*(\d{1,2})\s*[\.)\]]\s*", text)
+        if match:
+            return int(match.group(1))
+        match = re.match(r"^\s*문항\s*(\d{1,2})\s*(?:번)?", text)
+        if match:
+            return int(match.group(1))
+        match = re.match(r"^\s*(\d{1,2})\s*번\s+", text)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _resolve_page_width(payload: dict, candidates: list[dict]) -> float:
+    page_width_raw = payload.get("page_width")
+    try:
+        page_width = float(page_width_raw)
+        if page_width > 0:
+            return page_width
+    except Exception:
+        pass
+
+    max_x2 = 0.0
+    for item in candidates:
+        xyxy = _to_bbox_xyxy(item.get("bbox"))
+        if not xyxy:
+            continue
+        max_x2 = max(max_x2, xyxy[2])
+    return max(max_x2, 1.0)
+
+
+def _detect_layout_mode(candidates: list[dict], page_width: float) -> tuple[str, float]:
+    centers: list[float] = []
+    for item in candidates:
+        xyxy = _to_bbox_xyxy(item.get("bbox"))
+        if not xyxy:
+            continue
+        centers.append((xyxy[0] + xyxy[2]) / 2.0)
+    if len(centers) < 2:
+        return "single_column", page_width / 2.0
+
+    sorted_centers = sorted(centers)
+    max_gap = 0.0
+    split_index = 0
+    for idx in range(len(sorted_centers) - 1):
+        gap = sorted_centers[idx + 1] - sorted_centers[idx]
+        if gap > max_gap:
+            max_gap = gap
+            split_index = idx
+
+    if max_gap < page_width * 0.14:
+        return "single_column", page_width / 2.0
+
+    split_x = (sorted_centers[split_index] + sorted_centers[split_index + 1]) / 2.0
+    left_count = sum(1 for value in sorted_centers if value <= split_x)
+    right_count = len(sorted_centers) - left_count
+    if left_count < 1 or right_count < 1:
+        return "single_column", page_width / 2.0
+    return "two_column", split_x
+
+
+def _candidate_layout_sort_key(candidate: dict, *, layout_mode: str, split_x: float) -> tuple[int, float, float]:
+    xyxy = _to_bbox_xyxy(candidate.get("bbox"))
+    if not xyxy:
+        return (0, 0.0, 0.0)
+    x1, y1, x2, _ = xyxy
+    if layout_mode == "two_column":
+        column_rank = 0 if ((x1 + x2) / 2.0) <= split_x else 1
+        return (column_rank, y1, x1)
+    return (0, y1, x1)
+
+
+def _filter_asset_hints_by_candidate_bbox(hints: list[dict], candidate_bbox: dict) -> list[dict]:
+    candidate_xyxy = _to_bbox_xyxy(candidate_bbox)
+    if not candidate_xyxy:
+        return hints
+
+    filtered: list[dict] = []
+    for hint in hints:
+        hint_bbox = hint.get("bbox")
+        hint_xyxy = _to_bbox_xyxy(hint_bbox)
+        if not hint_xyxy:
+            continue
+        overlap = _bbox_intersection_area(candidate_xyxy, hint_xyxy)
+        if overlap <= 0:
+            continue
+        hint_area = _bbox_area(hint_xyxy)
+        if hint_area <= 0:
+            continue
+        if overlap / hint_area >= 0.15:
+            filtered.append(hint)
+    return filtered
+
+
+def _to_bbox_xyxy(bbox: Any) -> tuple[float, float, float, float] | None:
+    if isinstance(bbox, dict):
+        if {"x1", "y1", "x2", "y2"} <= set(bbox):
+            try:
+                return float(bbox["x1"]), float(bbox["y1"]), float(bbox["x2"]), float(bbox["y2"])
+            except Exception:
+                return None
+        if {"left", "top", "right", "bottom"} <= set(bbox):
+            try:
+                return float(bbox["left"]), float(bbox["top"]), float(bbox["right"]), float(bbox["bottom"])
+            except Exception:
+                return None
+        if {"x", "y", "w", "h"} <= set(bbox):
+            try:
+                x = float(bbox["x"])
+                y = float(bbox["y"])
+                w = float(bbox["w"])
+                h = float(bbox["h"])
+                return x, y, x + w, y + h
+            except Exception:
+                return None
+        if {"x", "y", "width", "height"} <= set(bbox):
+            try:
+                x = float(bbox["x"])
+                y = float(bbox["y"])
+                w = float(bbox["width"])
+                h = float(bbox["height"])
+                return x, y, x + w, y + h
+            except Exception:
+                return None
+        return None
+
+    if isinstance(bbox, list):
+        if len(bbox) == 4 and all(isinstance(item, (int, float)) for item in bbox):
+            try:
+                return float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
+            except Exception:
+                return None
+        if len(bbox) >= 3 and all(isinstance(item, list) and len(item) >= 2 for item in bbox):
+            try:
+                xs = [float(item[0]) for item in bbox]
+                ys = [float(item[1]) for item in bbox]
+                return min(xs), min(ys), max(xs), max(ys)
+            except Exception:
+                return None
+    return None
+
+
+def _bbox_dict_from_xyxy(xyxy: tuple[float, float, float, float]) -> dict:
+    x1, y1, x2, y2 = xyxy
+    return {"x1": float(x1), "y1": float(y1), "x2": float(x2), "y2": float(y2)}
+
+
+def _bbox_area(xyxy: tuple[float, float, float, float]) -> float:
+    x1, y1, x2, y2 = xyxy
+    return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+
+
+def _bbox_intersection_area(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+) -> float:
+    lx1, ly1, lx2, ly2 = left
+    rx1, ry1, rx2, ry2 = right
+    ix1 = max(lx1, rx1)
+    iy1 = max(ly1, ry1)
+    ix2 = min(lx2, rx2)
+    iy2 = min(ly2, ry2)
+    return _bbox_area((ix1, iy1, ix2, iy2))
 
 
 def classify_candidate(
