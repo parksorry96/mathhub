@@ -165,3 +165,10 @@
 - [x] OCR/AI에서 넘어온 LaTeX가 텍스트가 아니라 수식 형태로 보이도록 UX 개선
 - [x] 기존 검수 플로우(승인/반려/이전/다음) 동작 유지
 - [x] 검증 완료 (`pnpm --filter @mathhub/web lint`, `pnpm --filter @mathhub/web build`)
+
+### 23. 문항 단위 미리보기 + 시각 자산 적재 강화 — `e1789d9`
+- [x] 하이브리드 문항 분리 규칙 확장(`숫자.`, `[숫자]`, `문항 n`, `n번`) 및 fallback 전략 적용
+- [x] `GET /ocr/jobs/{job_id}/questions` API 추가로 문항 단위 미리보기 데이터 제공
+- [x] 작업 목록 미리보기를 페이지 단위에서 문항 단위(list-detail) UI로 개편하고 가독성 개선
+- [x] 그림/그래프/표 힌트 추출을 `materialize-problems`에 연결하여 `problem_assets` upsert 저장
+- [x] 검증 완료 (`ruff check`, `python -m compileall`, `pnpm --filter @mathhub/web lint`, `pnpm --filter @mathhub/web build`)
