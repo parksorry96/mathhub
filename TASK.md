@@ -65,3 +65,12 @@
 - [x] API 키 미설정/호출 실패 시 휴리스틱 분류 fallback 반영
 - [x] 의존성 추가 (`httpx`) 및 정적 점검 통과
 - [x] 통합 검증 수행 (job 생성 → page 적재 → ai-classify → DB 저장 확인)
+
+### 9. OCR 분류결과 문제은행 적재 API 추가 — `4cc06f9`
+- [x] `POST /ocr/jobs/{job_id}/materialize-problems` 엔드포인트 추가
+- [x] AI 분류 결과(`ocr_pages.raw_payload.ai_classification.candidates`)를 `problems`로 upsert
+- [x] `external_problem_key` 고정 키 전략으로 재실행 시 idempotent 업데이트 보장
+- [x] 과목코드 미매핑/신뢰도 미달/본문 누락 후보는 `skipped`로 분리 처리
+- [x] 단원코드가 유효한 경우 `problem_unit_map` primary 매핑 반영
+- [x] `needs_review` 메타데이터를 기본 부여해 후속 검수 흐름 유지
+- [x] 통합 검증 수행 (1차 insert, 2차 update, DB 반영 확인)
