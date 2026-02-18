@@ -86,3 +86,31 @@ class OCRJobAIClassifyResponse(BaseModel):
     candidates_processed: int
     candidates_accepted: int
     page_results: list[AIPageClassification]
+
+
+class OCRJobMaterializeProblemsRequest(BaseModel):
+    curriculum_code: str = Field(default="CSAT_2027", min_length=1)
+    source_id: UUID | None = None
+    min_confidence: Decimal = Field(default=0, ge=0, le=100)
+    default_point_value: int = Field(default=3, ge=2, le=4)
+    default_response_type: str = Field(default="short_answer", min_length=1)
+    default_answer_key: str = Field(default="PENDING_REVIEW", min_length=1)
+
+
+class MaterializedProblemResult(BaseModel):
+    page_no: int
+    candidate_no: int
+    status: str
+    problem_id: UUID | None
+    external_problem_key: str
+    reason: str | None
+
+
+class OCRJobMaterializeProblemsResponse(BaseModel):
+    job_id: UUID
+    curriculum_code: str
+    source_id: UUID | None
+    inserted_count: int
+    updated_count: int
+    skipped_count: int
+    results: list[MaterializedProblemResult]
