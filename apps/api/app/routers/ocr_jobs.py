@@ -2,7 +2,7 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 from psycopg.errors import UniqueViolation
 from psycopg.types.json import Json
 
@@ -25,6 +25,8 @@ from app.schemas.ocr_jobs import (
     OCRJobCreateRequest,
     OCRJobCreateResponse,
     OCRJobDetailResponse,
+    OCRJobListItem,
+    OCRJobListResponse,
     OCRJobMaterializeProblemsRequest,
     OCRJobMaterializeProblemsResponse,
     OCRJobMathpixSubmitRequest,
@@ -83,6 +85,117 @@ def _resolve_mathpix_credentials(
             detail="mathpix credentials missing: provide app_id/app_key or set MATHPIX_APP_ID/MATHPIX_APP_KEY",
         )
     return resolved_app_id, resolved_app_key, resolved_base_url
+
+
+@router.get("", response_model=OCRJobListResponse)
+def list_ocr_jobs(
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    status_filter: str | None = Query(default=None, alias="status"),
+    q: str | None = Query(default=None, max_length=200),
+) -> OCRJobListResponse:
+    allowed_statuses = {"queued", "uploading", "processing", "completed", "failed", "cancelled"}
+    if status_filter and status_filter not in allowed_statuses:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="status must be one of queued, uploading, processing, completed, failed, cancelled",
+        )
+
+    where_clauses: list[str] = []
+    params: list = []
+
+    if status_filter:
+        where_clauses.append("j.status::text = %s")
+        params.append(status_filter)
+    if q:
+        where_clauses.append(
+            "(d.original_filename ILIKE %s OR d.storage_key ILIKE %s OR COALESCE(j.provider_job_id, '') ILIKE %s)"
+        )
+        q_value = f"%{q.strip()}%"
+        params.extend([q_value, q_value, q_value])
+
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT
+                    j.id,
+                    j.document_id,
+                    j.provider,
+                    j.provider_job_id,
+                    j.status::text AS status,
+                    j.progress_pct,
+                    j.error_message,
+                    j.requested_at,
+                    j.started_at,
+                    j.finished_at,
+                    d.storage_key,
+                    d.original_filename,
+                    COALESCE(pg.total_pages, 0) AS total_pages,
+                    COALESCE(pg.processed_pages, 0) AS processed_pages
+                FROM ocr_jobs j
+                JOIN ocr_documents d ON d.id = j.document_id
+                LEFT JOIN LATERAL (
+                    SELECT
+                        COUNT(*)::int AS total_pages,
+                        COUNT(*) FILTER (
+                            WHERE p.extracted_text IS NOT NULL
+                               OR p.extracted_latex IS NOT NULL
+                               OR p.status = 'completed'
+                        )::int AS processed_pages
+                    FROM ocr_pages p
+                    WHERE p.job_id = j.id
+                ) pg ON TRUE
+                {where_sql}
+                ORDER BY j.requested_at DESC
+                LIMIT %s OFFSET %s
+                """,
+                (*params, limit, offset),
+            )
+            rows = cur.fetchall()
+
+            cur.execute(
+                f"""
+                SELECT COUNT(*) AS cnt
+                FROM ocr_jobs j
+                JOIN ocr_documents d ON d.id = j.document_id
+                {where_sql}
+                """,
+                tuple(params),
+            )
+            total_row = cur.fetchone()
+            total = int(total_row["cnt"]) if total_row else 0
+
+            cur.execute(
+                f"""
+                SELECT
+                    j.status::text AS status,
+                    COUNT(*) AS cnt
+                FROM ocr_jobs j
+                JOIN ocr_documents d ON d.id = j.document_id
+                {where_sql}
+                GROUP BY j.status::text
+                """,
+                tuple(params),
+            )
+            status_rows = cur.fetchall()
+
+    status_counts = {key: 0 for key in allowed_statuses}
+    for row in status_rows:
+        key = row["status"]
+        if key in status_counts:
+            status_counts[key] = int(row["cnt"])
+
+    items = [OCRJobListItem(**row) for row in rows]
+    return OCRJobListResponse(
+        items=items,
+        total=total,
+        limit=limit,
+        offset=offset,
+        status_counts=status_counts,
+    )
 
 
 @router.post("", response_model=OCRJobCreateResponse, status_code=status.HTTP_201_CREATED)

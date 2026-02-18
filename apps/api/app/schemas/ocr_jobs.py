@@ -48,6 +48,31 @@ class OCRJobDetailResponse(BaseModel):
     document: OCRDocumentSummary
 
 
+class OCRJobListItem(BaseModel):
+    id: UUID
+    document_id: UUID
+    provider: str
+    provider_job_id: str | None
+    status: str
+    progress_pct: Decimal
+    error_message: str | None
+    requested_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    storage_key: str
+    original_filename: str
+    total_pages: int
+    processed_pages: int
+
+
+class OCRJobListResponse(BaseModel):
+    items: list[OCRJobListItem]
+    total: int
+    limit: int
+    offset: int
+    status_counts: dict[str, int]
+
+
 class OCRJobAIClassifyRequest(BaseModel):
     api_key: str | None = None
     api_base_url: str | None = None

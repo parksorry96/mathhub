@@ -1,25 +1,85 @@
 "use client";
 
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  Alert,
   Box,
+  Button,
   Card,
   CardContent,
-  Typography,
   Chip,
-  Button,
   Divider,
+  Typography,
 } from "@mui/material";
 import CheckRoundedIcon from "@mui/icons-material/CheckRounded";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
-import EditRoundedIcon from "@mui/icons-material/EditRounded";
 import NavigateNextRoundedIcon from "@mui/icons-material/NavigateNextRounded";
 import NavigateBeforeRoundedIcon from "@mui/icons-material/NavigateBeforeRounded";
-import { mockProblems } from "@/mocks/data";
+import { listProblems, reviewProblem, type ProblemListItem } from "@/lib/api";
 
-const pendingProblems = mockProblems.filter((p) => p.status === "pending");
+function difficultyLabel(pointValue: number) {
+  if (pointValue <= 2) return "2점";
+  if (pointValue === 3) return "3점";
+  return "4점";
+}
 
 export default function ReviewPage() {
-  const current = pendingProblems[0];
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [queue, setQueue] = useState<ProblemListItem[]>([]);
+  const [currentIndex, setCurrentIndex] = useState(0);
+
+  const loadQueue = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await listProblems({
+        limit: 100,
+        offset: 0,
+        review_status: "pending",
+      });
+      setQueue(res.items);
+      setCurrentIndex((prev) => {
+        if (res.items.length === 0) return 0;
+        return Math.min(prev, res.items.length - 1);
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "검수 큐를 불러오지 못했습니다.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadQueue();
+  }, [loadQueue]);
+
+  const current = queue[currentIndex];
+  const tags = useMemo(() => {
+    if (!current) return [] as string[];
+    return [current.subject_name_ko, current.unit_name_ko].filter(Boolean) as string[];
+  }, [current]);
+
+  const handleReview = useCallback(
+    async (action: "approve" | "reject") => {
+      if (!current) return;
+      setSubmitting(true);
+      setError(null);
+      setNotice(null);
+      try {
+        await reviewProblem(current.id, { action });
+        setNotice(action === "approve" ? "문항을 승인했습니다." : "문항을 반려했습니다.");
+        await loadQueue();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "검수 처리에 실패했습니다.");
+      } finally {
+        setSubmitting(false);
+      }
+    },
+    [current, loadQueue],
+  );
 
   return (
     <Box>
@@ -29,11 +89,11 @@ export default function ReviewPage() {
             검수 큐
           </Typography>
           <Typography variant="body2" sx={{ color: "#919497", mt: 0.5 }}>
-            추출된 문제를 확인하고 승인/반려합니다
+            실제 API(GET /problems, PATCH /problems/{"{id}"}/review) 기반 검수
           </Typography>
         </Box>
         <Chip
-          label={`${pendingProblems.length}건 대기`}
+          label={`${queue.length}건 대기`}
           sx={{
             color: "#D4A574",
             backgroundColor: "rgba(212,165,116,0.12)",
@@ -43,26 +103,32 @@ export default function ReviewPage() {
         />
       </Box>
 
+      {error && (
+        <Alert severity="error" sx={{ mb: 2 }}>
+          {error}
+        </Alert>
+      )}
+      {notice && (
+        <Alert severity="success" sx={{ mb: 2 }}>
+          {notice}
+        </Alert>
+      )}
+
+      {!loading && !current && (
+        <Card>
+          <CardContent sx={{ p: 4 }}>
+            <Typography variant="body1" sx={{ color: "#E7E3E3" }}>
+              현재 검수 대기 문항이 없습니다.
+            </Typography>
+          </CardContent>
+        </Card>
+      )}
+
       {current && (
-        <Box
-          sx={{
-            display: "grid",
-            gridTemplateColumns: "1fr 320px",
-            gap: 2.5,
-          }}
-        >
-          {/* Problem Preview */}
+        <Box sx={{ display: "grid", gridTemplateColumns: "1fr 320px", gap: 2.5 }}>
           <Card>
             <CardContent sx={{ p: 3, "&:last-child": { pb: 3 } }}>
-              {/* Header */}
-              <Box
-                sx={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  mb: 3,
-                }}
-              >
+              <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 3 }}>
                 <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
                   <Typography
                     variant="caption"
@@ -73,10 +139,10 @@ export default function ReviewPage() {
                       letterSpacing: "0.05em",
                     }}
                   >
-                    문항 #{current.questionNumber}
+                    문항 {current.source_problem_label ?? "—"}
                   </Typography>
                   <Chip
-                    label={current.source}
+                    label={current.source_title ?? current.document_filename ?? "미지정"}
                     size="small"
                     variant="outlined"
                     sx={{
@@ -91,6 +157,8 @@ export default function ReviewPage() {
                   <Button
                     size="small"
                     startIcon={<NavigateBeforeRoundedIcon />}
+                    disabled={currentIndex === 0}
+                    onClick={() => setCurrentIndex((prev) => Math.max(0, prev - 1))}
                     sx={{ color: "#919497", fontSize: 12, minWidth: "auto" }}
                   >
                     이전
@@ -98,6 +166,8 @@ export default function ReviewPage() {
                   <Button
                     size="small"
                     endIcon={<NavigateNextRoundedIcon />}
+                    disabled={currentIndex >= queue.length - 1}
+                    onClick={() => setCurrentIndex((prev) => Math.min(queue.length - 1, prev + 1))}
                     sx={{ color: "#919497", fontSize: 12, minWidth: "auto" }}
                   >
                     다음
@@ -105,34 +175,26 @@ export default function ReviewPage() {
                 </Box>
               </Box>
 
-              {/* Problem Content */}
               <Box
                 sx={{
                   backgroundColor: "#1C1C1C",
                   borderRadius: 2,
                   p: 4,
                   mb: 3,
-                  minHeight: 200,
+                  minHeight: 220,
                 }}
               >
-                <Typography
-                  variant="body1"
-                  sx={{
-                    color: "#FFFFFF",
-                    fontSize: 16,
-                    lineHeight: 1.8,
-                    fontWeight: 400,
-                  }}
-                >
-                  {current.content}
+                <Typography variant="body1" sx={{ color: "#FFFFFF", fontSize: 16, lineHeight: 1.8 }}>
+                  {current.content || "(본문 없음)"}
                 </Typography>
               </Box>
 
-              {/* Actions */}
               <Box sx={{ display: "flex", gap: 1.5, justifyContent: "flex-end" }}>
                 <Button
                   variant="outlined"
                   startIcon={<CloseRoundedIcon />}
+                  onClick={() => void handleReview("reject")}
+                  disabled={submitting}
                   sx={{
                     borderColor: "rgba(196,92,92,0.3)",
                     color: "#C45C5C",
@@ -145,22 +207,10 @@ export default function ReviewPage() {
                   반려
                 </Button>
                 <Button
-                  variant="outlined"
-                  startIcon={<EditRoundedIcon />}
-                  sx={{
-                    borderColor: "rgba(231,227,227,0.12)",
-                    color: "#E7E3E3",
-                    "&:hover": {
-                      borderColor: "#E7E3E3",
-                      backgroundColor: "rgba(231,227,227,0.04)",
-                    },
-                  }}
-                >
-                  수정
-                </Button>
-                <Button
                   variant="contained"
                   startIcon={<CheckRoundedIcon />}
+                  onClick={() => void handleReview("approve")}
+                  disabled={submitting}
                   sx={{
                     backgroundColor: "#262A2D",
                     color: "#FFFFFF",
@@ -173,26 +223,19 @@ export default function ReviewPage() {
             </CardContent>
           </Card>
 
-          {/* Side Panel */}
           <Card>
             <CardContent sx={{ p: 3, "&:last-child": { pb: 3 } }}>
-              <Typography
-                variant="subtitle2"
-                sx={{ fontWeight: 600, color: "#FFFFFF", mb: 2 }}
-              >
+              <Typography variant="subtitle2" sx={{ fontWeight: 600, color: "#FFFFFF", mb: 2 }}>
                 문항 정보
               </Typography>
 
               <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
                 <Box>
-                  <Typography
-                    variant="caption"
-                    sx={{ color: "#919497", fontWeight: 500 }}
-                  >
+                  <Typography variant="caption" sx={{ color: "#919497", fontWeight: 500 }}>
                     난이도
                   </Typography>
                   <Chip
-                    label="보통"
+                    label={difficultyLabel(current.point_value)}
                     size="small"
                     sx={{
                       ml: 1,
@@ -218,20 +261,26 @@ export default function ReviewPage() {
                     태그
                   </Typography>
                   <Box sx={{ display: "flex", gap: 0.5, flexWrap: "wrap" }}>
-                    {current.tags.map((tag) => (
-                      <Chip
-                        key={tag}
-                        label={tag}
-                        size="small"
-                        variant="outlined"
-                        sx={{
-                          borderColor: "rgba(231,227,227,0.1)",
-                          color: "#919497",
-                          fontSize: 11,
-                          height: 20,
-                        }}
-                      />
-                    ))}
+                    {tags.length > 0 ? (
+                      tags.map((tag) => (
+                        <Chip
+                          key={tag}
+                          label={tag}
+                          size="small"
+                          variant="outlined"
+                          sx={{
+                            borderColor: "rgba(231,227,227,0.1)",
+                            color: "#919497",
+                            fontSize: 11,
+                            height: 20,
+                          }}
+                        />
+                      ))
+                    ) : (
+                      <Typography variant="caption" sx={{ color: "#52525B" }}>
+                        태그 없음
+                      </Typography>
+                    )}
                   </Box>
                 </Box>
 
@@ -249,11 +298,8 @@ export default function ReviewPage() {
                   >
                     출처
                   </Typography>
-                  <Typography
-                    variant="body2"
-                    sx={{ color: "#E7E3E3", fontSize: 13 }}
-                  >
-                    {current.source}
+                  <Typography variant="body2" sx={{ color: "#E7E3E3", fontSize: 13 }}>
+                    {current.source_title ?? current.document_filename ?? "미지정"}
                   </Typography>
                 </Box>
 
@@ -267,20 +313,16 @@ export default function ReviewPage() {
                       mb: 0.5,
                     }}
                   >
-                    정답
+                    신뢰도
                   </Typography>
-                  <Typography
-                    variant="body2"
-                    sx={{ color: "#52525B", fontSize: 13, fontStyle: "italic" }}
-                  >
-                    아직 입력되지 않음
+                  <Typography variant="body2" sx={{ color: "#E7E3E3", fontSize: 13 }}>
+                    {current.confidence ? `${current.confidence}%` : "정보 없음"}
                   </Typography>
                 </Box>
               </Box>
 
               <Divider sx={{ borderColor: "rgba(231,227,227,0.06)", my: 2 }} />
 
-              {/* Queue List */}
               <Typography
                 variant="caption"
                 sx={{
@@ -294,15 +336,15 @@ export default function ReviewPage() {
               >
                 대기 목록
               </Typography>
-              {pendingProblems.map((p, i) => (
+              {queue.map((item, i) => (
                 <Box
-                  key={p.id}
+                  key={item.id}
+                  onClick={() => setCurrentIndex(i)}
                   sx={{
                     py: 1,
                     px: 1.5,
                     borderRadius: 1,
-                    backgroundColor:
-                      i === 0 ? "rgba(255,255,255,0.04)" : "transparent",
+                    backgroundColor: i === currentIndex ? "rgba(255,255,255,0.04)" : "transparent",
                     cursor: "pointer",
                     "&:hover": { backgroundColor: "rgba(255,255,255,0.03)" },
                     mb: 0.5,
@@ -311,15 +353,15 @@ export default function ReviewPage() {
                   <Typography
                     variant="body2"
                     sx={{
-                      color: i === 0 ? "#FFFFFF" : "#919497",
+                      color: i === currentIndex ? "#FFFFFF" : "#919497",
                       fontSize: 12,
-                      fontWeight: i === 0 ? 500 : 400,
+                      fontWeight: i === currentIndex ? 500 : 400,
                       overflow: "hidden",
                       textOverflow: "ellipsis",
                       whiteSpace: "nowrap",
                     }}
                   >
-                    #{p.questionNumber} {p.content}
+                    {item.source_problem_label ?? "—"} {item.content}
                   </Typography>
                 </Box>
               ))}
