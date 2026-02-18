@@ -178,3 +178,9 @@
 - [x] fallback 경로에서 클라이언트 문항 분할(`숫자.`, `[숫자]`, `문항 n`, `n번`) 적용
 - [x] fallback 경로에서도 시각요소(그림/그래프/표) 힌트 태그 유지
 - [x] 검증 완료 (`pnpm --filter @mathhub/web lint`, `pnpm --filter @mathhub/web build`)
+
+### 25. AI 분류 속도 개선(배치 step 처리) — `c81b2bd`
+- [x] `OCRJobAIClassifyRequest`에 `max_candidates_per_call`(기본 5, 최대 50) 추가
+- [x] `POST /ocr/jobs/{job_id}/ai-classify/step`가 호출당 1문항이 아니라 다문항 배치 처리하도록 개선
+- [x] 프론트 classify loop에서 `max_candidates_per_call: 8`로 요청해 왕복 횟수 감소
+- [x] 검증 완료 (`ruff check`, `python -m compileall`, `pnpm --filter @mathhub/web lint`, `pnpm --filter @mathhub/web build`)
