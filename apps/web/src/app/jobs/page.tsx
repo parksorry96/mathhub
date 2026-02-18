@@ -30,10 +30,17 @@ import RefreshRoundedIcon from "@mui/icons-material/RefreshRounded";
 import CloudUploadRoundedIcon from "@mui/icons-material/CloudUploadRounded";
 import SmartToyRoundedIcon from "@mui/icons-material/SmartToyRounded";
 import PlaylistAddCheckRoundedIcon from "@mui/icons-material/PlaylistAddCheckRounded";
+import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
 import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
 import VisibilityRoundedIcon from "@mui/icons-material/VisibilityRounded";
 import { MathJax, MathJaxContext } from "better-react-mathjax";
-import type { ApiJobStatus, OcrJobListItem, OcrPagePreviewItem } from "@/lib/api";
+import type {
+  ApiJobStatus,
+  OcrJobAiClassifyStepResponse,
+  OcrJobListItem,
+  OcrJobMathpixSyncResponse,
+  OcrPagePreviewItem,
+} from "@/lib/api";
 import {
   classifyOcrJobStep,
   deleteOcrJob,
@@ -92,6 +99,10 @@ function isMathpixSubmitSourceSupported(storageKey: string) {
   return key.startsWith("s3://") || key.startsWith("http://") || key.startsWith("https://");
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export default function JobsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -136,46 +147,100 @@ export default function JobsPage() {
     return () => clearTimeout(timer);
   }, [searchText, statusFilter, loadJobs]);
 
+  const runClassifyLoop = useCallback(async (job: OcrJobListItem): Promise<OcrJobAiClassifyStepResponse> => {
+    let latest: OcrJobAiClassifyStepResponse | null = null;
+    let attempts = 0;
+    const maxAttempts = 3000;
+    while (attempts < maxAttempts) {
+      const step = await classifyOcrJobStep(job.id, { max_pages: 50, min_confidence: 0 });
+      latest = step;
+      if (!step.done) {
+        const at =
+          step.current_page_no && step.current_candidate_no
+            ? ` (P${step.current_page_no}-C${step.current_candidate_no})`
+            : "";
+        setNotice(`${job.original_filename}: AI 분류 진행중 ${step.candidates_processed}/${step.total_candidates}${at}`);
+      }
+      if (step.done) break;
+      attempts += 1;
+    }
+    if (!latest) {
+      throw new Error("AI 분류 응답을 받지 못했습니다.");
+    }
+    if (!latest.done) {
+      throw new Error("AI 분류가 시간 내 완료되지 않았습니다. 다시 시도해주세요.");
+    }
+    return latest;
+  }, []);
+
+  const runSyncUntilCompleted = useCallback(async (job: OcrJobListItem): Promise<OcrJobMathpixSyncResponse> => {
+    const terminalStatuses: ApiJobStatus[] = ["completed", "failed", "cancelled"];
+    const maxAttempts = 180;
+    let attempts = 0;
+    let latest: OcrJobMathpixSyncResponse | null = null;
+
+    while (attempts < maxAttempts) {
+      const step = await syncMathpixJob(job.id, {});
+      latest = step;
+      setNotice(`${job.original_filename}: OCR 동기화 ${toNumber(step.progress_pct).toFixed(0)}% (${step.status})`);
+      if (terminalStatuses.includes(step.status)) {
+        break;
+      }
+      attempts += 1;
+      await sleep(2000);
+    }
+
+    if (!latest) {
+      throw new Error("Mathpix 동기화 응답을 받지 못했습니다.");
+    }
+    if (latest.status === "failed") {
+      throw new Error(latest.error_message || "Mathpix 처리에 실패했습니다.");
+    }
+    if (latest.status === "cancelled") {
+      throw new Error("Mathpix 작업이 취소되었습니다.");
+    }
+    if (latest.status !== "completed") {
+      throw new Error("Mathpix 동기화가 시간 내 완료되지 않았습니다. 다시 시도해주세요.");
+    }
+    return latest;
+  }, []);
+
   const runAction = useCallback(
-    async (job: OcrJobListItem, action: "submit" | "sync" | "classify" | "materialize" | "delete") => {
+    async (
+      job: OcrJobListItem,
+      action: "pipeline" | "submit" | "sync" | "classify" | "materialize" | "delete",
+    ) => {
       setNotice(null);
       setError(null);
       setRunningAction((prev) => ({ ...prev, [job.id]: action }));
       try {
-        if (action === "submit") {
+        if (action === "pipeline") {
+          if (!job.provider_job_id) {
+            await submitMathpixJob(job.id, {});
+            setNotice(`${job.original_filename}: Mathpix 제출 완료`);
+          }
+          const syncResult = await runSyncUntilCompleted(job);
+          const classifyResult = await runClassifyLoop(job);
+          const materialized = await materializeProblems(job.id, {
+            curriculum_code: "CSAT_2027",
+            min_confidence: 0,
+            default_point_value: 3,
+            default_response_type: "short_answer",
+            default_answer_key: "PENDING_REVIEW",
+          });
+          setNotice(
+            `${job.original_filename}: 자동실행 완료 (OCR ${toNumber(syncResult.progress_pct).toFixed(0)}%, AI ${classifyResult.candidates_processed}/${classifyResult.total_candidates}, 적재 +${materialized.inserted_count}/${materialized.updated_count})`,
+          );
+        } else if (action === "submit") {
           await submitMathpixJob(job.id, {});
           setNotice(`${job.original_filename}: Mathpix 제출 완료`);
         } else if (action === "sync") {
-          await syncMathpixJob(job.id, {});
-          setNotice(`${job.original_filename}: Mathpix 상태 동기화 완료`);
+          const syncResult = await syncMathpixJob(job.id, {});
+          setNotice(
+            `${job.original_filename}: Mathpix 상태 동기화 (${syncResult.status}, ${toNumber(syncResult.progress_pct).toFixed(0)}%)`,
+          );
         } else if (action === "classify") {
-          let latest: {
-            done: boolean;
-            total_candidates: number;
-            candidates_processed: number;
-            provider: string;
-            model: string;
-          } | null = null;
-          let attempts = 0;
-          const maxAttempts = 3000;
-          while (attempts < maxAttempts) {
-            const step = await classifyOcrJobStep(job.id, { max_pages: 50, min_confidence: 0 });
-            latest = step;
-            if (!step.done) {
-              const at = step.current_page_no && step.current_candidate_no ? ` (P${step.current_page_no}-C${step.current_candidate_no})` : "";
-              setNotice(
-                `${job.original_filename}: AI 분류 진행중 ${step.candidates_processed}/${step.total_candidates}${at}`,
-              );
-            }
-            if (step.done) break;
-            attempts += 1;
-          }
-          if (!latest) {
-            throw new Error("AI 분류 응답을 받지 못했습니다.");
-          }
-          if (!latest.done) {
-            throw new Error("AI 분류가 시간 내 완료되지 않았습니다. 다시 시도해주세요.");
-          }
+          const latest = await runClassifyLoop(job);
           setNotice(
             `${job.original_filename}: AI 분류 완료 (${latest.provider}, ${latest.candidates_processed}/${latest.total_candidates})`,
           );
@@ -207,7 +272,7 @@ export default function JobsPage() {
         });
       }
     },
-    [loadJobs, searchText, statusFilter],
+    [loadJobs, runClassifyLoop, runSyncUntilCompleted, searchText, statusFilter],
   );
 
   const openPreview = useCallback(async (job: OcrJobListItem) => {
@@ -241,7 +306,7 @@ export default function JobsPage() {
           작업 목록
         </Typography>
         <Typography variant="body2" sx={{ color: "#919497", mt: 0.5 }}>
-          실제 API 연동 상태 관리 (제출/동기화/AI 분류/문제 적재)
+          실제 API 연동 상태 관리 (자동실행/제출/동기화/AI 분류/문제 적재)
         </Typography>
       </Box>
 
@@ -338,6 +403,7 @@ export default function JobsPage() {
                   const busy = runningAction[job.id];
                   const submitSourceSupported = isMathpixSubmitSourceSupported(job.storage_key);
                   const submitDisabled = Boolean(busy) || !!job.provider_job_id || !submitSourceSupported;
+                  const pipelineDisabled = Boolean(busy) || (!job.provider_job_id && !submitSourceSupported);
                   const aiTotal = job.ai_total_candidates ?? 0;
                   const aiProcessed = job.ai_candidates_processed ?? 0;
                   const aiAccepted = job.ai_candidates_accepted ?? 0;
@@ -350,6 +416,11 @@ export default function JobsPage() {
                     : !submitSourceSupported
                       ? "이 작업은 legacy storage_key(upload://)라 제출할 수 없습니다. 새로 업로드 후 시도하세요."
                       : "Mathpix 제출";
+                  const pipelineTooltip = busy
+                    ? "실행 중"
+                    : !job.provider_job_id && !submitSourceSupported
+                      ? "legacy storage_key(upload://)는 자동실행을 시작할 수 없습니다. 새로 업로드 후 시도하세요."
+                      : "전체 자동 실행 (제출→동기화→AI 분류→문제 적재)";
                   return (
                     <TableRow key={job.id} sx={{ "&:hover": { backgroundColor: "rgba(255,255,255,0.02)" } }}>
                       <TableCell>
@@ -408,6 +479,18 @@ export default function JobsPage() {
                       </TableCell>
                       <TableCell align="right">
                         <Box sx={{ display: "flex", justifyContent: "flex-end", gap: 0.5 }}>
+                          <Tooltip title={pipelineTooltip}>
+                            <span>
+                              <IconButton
+                                size="small"
+                                sx={{ color: "#D4A574" }}
+                                disabled={pipelineDisabled}
+                                onClick={() => void runAction(job, "pipeline")}
+                              >
+                                <AutoAwesomeRoundedIcon sx={{ fontSize: 16 }} />
+                              </IconButton>
+                            </span>
+                          </Tooltip>
                           <Tooltip title={busy ? "실행 중" : "OCR 미리보기"}>
                             <span>
                               <IconButton

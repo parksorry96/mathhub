@@ -72,6 +72,41 @@ export interface OcrJobAiClassifyStepResponse {
   current_candidate_provider: string | null;
 }
 
+export interface OcrJobMathpixSubmitResponse {
+  job_id: string;
+  provider_job_id: string;
+  status: string;
+  progress_pct: string;
+  requested_at: string;
+  started_at: string | null;
+}
+
+export interface OcrJobMathpixSyncResponse {
+  job_id: string;
+  provider_job_id: string;
+  status: ApiJobStatus;
+  progress_pct: string;
+  pages_upserted: number;
+  error_message: string | null;
+}
+
+export interface OcrJobMaterializeResponse {
+  job_id: string;
+  curriculum_code: string;
+  source_id: string | null;
+  inserted_count: number;
+  updated_count: number;
+  skipped_count: number;
+  results: Array<{
+    page_no: number;
+    candidate_no: number;
+    status: string;
+    problem_id: string | null;
+    external_problem_key: string;
+    reason: string | null;
+  }>;
+}
+
 export interface ProblemListItem {
   id: string;
   ocr_page_id: string | null;
@@ -255,14 +290,14 @@ export async function uploadFileToS3PresignedUrl(params: {
 }
 
 export function submitMathpixJob(jobId: string, payload?: Record<string, unknown>) {
-  return requestJson(`/ocr/jobs/${jobId}/mathpix/submit`, {
+  return requestJson<OcrJobMathpixSubmitResponse>(`/ocr/jobs/${jobId}/mathpix/submit`, {
     method: "POST",
     body: JSON.stringify(payload ?? {}),
   });
 }
 
 export function syncMathpixJob(jobId: string, payload?: Record<string, unknown>) {
-  return requestJson(`/ocr/jobs/${jobId}/mathpix/sync`, {
+  return requestJson<OcrJobMathpixSyncResponse>(`/ocr/jobs/${jobId}/mathpix/sync`, {
     method: "POST",
     body: JSON.stringify(payload ?? {}),
   });
@@ -283,7 +318,7 @@ export function classifyOcrJobStep(jobId: string, payload?: Record<string, unkno
 }
 
 export function materializeProblems(jobId: string, payload?: Record<string, unknown>) {
-  return requestJson(`/ocr/jobs/${jobId}/materialize-problems`, {
+  return requestJson<OcrJobMaterializeResponse>(`/ocr/jobs/${jobId}/materialize-problems`, {
     method: "POST",
     body: JSON.stringify(payload ?? {}),
   });
