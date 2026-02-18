@@ -20,16 +20,18 @@ from app.config import (
 def create_s3_client() -> BaseClient:
     access_key = get_s3_access_key_id()
     secret_key = get_s3_secret_access_key()
+    region = get_s3_region()
+    endpoint_url = get_s3_endpoint_url() or f"https://s3.{region}.amazonaws.com"
     if not access_key or not secret_key:
         raise ValueError("S3 credentials missing: set S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY")
 
     return boto3.client(
         "s3",
-        region_name=get_s3_region(),
+        region_name=region,
         aws_access_key_id=access_key,
         aws_secret_access_key=secret_key,
         aws_session_token=get_s3_session_token(),
-        endpoint_url=get_s3_endpoint_url(),
+        endpoint_url=endpoint_url,
     )
 
 
