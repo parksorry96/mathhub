@@ -172,3 +172,9 @@
 - [x] 작업 목록 미리보기를 페이지 단위에서 문항 단위(list-detail) UI로 개편하고 가독성 개선
 - [x] 그림/그래프/표 힌트 추출을 `materialize-problems`에 연결하여 `problem_assets` upsert 저장
 - [x] 검증 완료 (`ruff check`, `python -m compileall`, `pnpm --filter @mathhub/web lint`, `pnpm --filter @mathhub/web build`)
+
+### 24. 구버전 API 404 대응 미리보기 fallback — `2a1ab16`
+- [x] `/ocr/jobs/{job_id}/questions` 404 시 `/ocr/jobs/{job_id}/pages`로 자동 fallback 처리
+- [x] fallback 경로에서 클라이언트 문항 분할(`숫자.`, `[숫자]`, `문항 n`, `n번`) 적용
+- [x] fallback 경로에서도 시각요소(그림/그래프/표) 힌트 태그 유지
+- [x] 검증 완료 (`pnpm --filter @mathhub/web lint`, `pnpm --filter @mathhub/web build`)
