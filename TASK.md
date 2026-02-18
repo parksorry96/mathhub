@@ -135,3 +135,10 @@
 ### 18. 작업목록 페이지 수(0/0) 표시 보정 — `79a37be`
 - [x] `ocr_pages`가 비어 있어도 `raw_response.mathpix_status.num_pages(_completed)`를 fallback으로 사용하도록 목록 집계 SQL 보완
 - [x] API 응답 검증: 완료된 Mathpix 작업에서 `total_pages/processed_pages`가 실제 페이지 수(예: 20/20)로 노출됨 확인
+
+### 19. AI 분류 400 원인 해소 및 OCR 확인 기능 추가 — `0c0fdf8`
+- [x] Mathpix sync 시 기본 상태 응답에서 페이지 추출 실패하면 `/pdf/{id}.lines.json` 추가 조회로 `ocr_pages` 채움
+- [x] `GET /ocr/jobs/{job_id}/pages` API 추가로 페이지별 OCR 텍스트 확인 경로 제공
+- [x] 작업 목록 UI에 OCR 미리보기 버튼/다이얼로그 추가 (`/pages` API 연동)
+- [x] AI 분류 에러 메시지 개선 (페이지 없음 시 sync/pages 확인 가이드 제공)
+- [x] 실검증: 대상 job sync 후 `pages_upserted=20`, `/pages` total=20, `ai-classify` 400 재현 해소 확인
