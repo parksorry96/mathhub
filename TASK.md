@@ -231,3 +231,10 @@
 - [x] 문항 렌더러를 inline 이미지 방식으로 단일화(기존 별도 시각요소 그리드 제거)
 - [x] 이미지가 있는 문항에서 축 라벨/눈금 숫자(`x`,`y`,`1`,`2`,`y=f(x)` 등) 잡음 라인 제거 휴리스틱 추가
 - [x] 검증 수행 (`api ruff`, `api compileall`, `web lint`, `web build`, 스모크 테스트)
+
+### 32. 미리보기 선자산 추출 + AI 선택형 적재 지원 — `b105da1`
+- [x] `GET /ocr/jobs/{job_id}/questions`에서 `problem_assets`가 없어도 원본 PDF 기준 시각자산을 선추출하여 `asset_previews` 제공
+- [x] 선추출 자산은 `ocr-preview-assets` prefix로 S3에 저장하고 presigned URL로 즉시 미리보기 제공
+- [x] `materialize-problems`가 AI 분류 결과가 없어도 OCR 후보 + 휴리스틱 분류로 문제를 적재하도록 확장
+- [x] AI 미실행 적재 문항은 `metadata.ingest.source=ocr_heuristic_materialize`로 기록해 AI 필터와 분리
+- [x] 검증 수행 (`api ruff`, `api compileall`, `web lint`, `web build`, 실 API 호출 검증)
