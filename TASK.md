@@ -152,3 +152,10 @@
 - [x] `GET /problems`에 `ai_reviewed` 필터 및 AI 메타(provider/model) 노출 추가
 - [x] 검수 큐에 `AI 분류 문항만` 토글/배지/메타표시 추가로 사람 재검수 흐름 보강
 - [x] 검증 완료 (`ruff`, `compileall`, `web lint/build`, 실제 step/API 호출로 진행률 증가 확인)
+
+### 21. 작업목록 원클릭 자동실행 파이프라인 추가 — `e362232`
+- [x] 작업목록에 자동실행 버튼 추가 (`제출 → 동기화 폴링 → AI step 분류 → 문제 적재`)
+- [x] 자동실행 중 단계별 진행 문구를 표시하도록 UX 보강
+- [x] `sync/materialize` 응답 타입을 API 클라이언트에 명시해 타입 안정성 강화
+- [x] legacy `upload://` 작업은 자동실행 시작 불가하도록 비활성/툴팁 처리
+- [x] 검증 완료 (`pnpm --filter @mathhub/web lint`, `pnpm --filter @mathhub/web build`)
