@@ -182,8 +182,18 @@ def list_ocr_jobs(
                     j.finished_at,
                     d.storage_key,
                     d.original_filename,
-                    COALESCE(pg.total_pages, 0) AS total_pages,
-                    COALESCE(pg.processed_pages, 0) AS processed_pages
+                    CASE
+                        WHEN pg.total_pages > 0 THEN pg.total_pages
+                        WHEN COALESCE(j.raw_response #>> '{{mathpix_status,num_pages}}', '') ~ '^[0-9]+$'
+                            THEN (j.raw_response #>> '{{mathpix_status,num_pages}}')::int
+                        ELSE 0
+                    END AS total_pages,
+                    CASE
+                        WHEN pg.total_pages > 0 THEN pg.processed_pages
+                        WHEN COALESCE(j.raw_response #>> '{{mathpix_status,num_pages_completed}}', '') ~ '^[0-9]+$'
+                            THEN (j.raw_response #>> '{{mathpix_status,num_pages_completed}}')::int
+                        ELSE 0
+                    END AS processed_pages
                 FROM ocr_jobs j
                 JOIN ocr_documents d ON d.id = j.document_id
                 LEFT JOIN LATERAL (
