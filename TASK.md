@@ -142,3 +142,13 @@
 - [x] 작업 목록 UI에 OCR 미리보기 버튼/다이얼로그 추가 (`/pages` API 연동)
 - [x] AI 분류 에러 메시지 개선 (페이지 없음 시 sync/pages 확인 가이드 제공)
 - [x] 실검증: 대상 job sync 후 `pages_upserted=20`, `/pages` total=20, `ai-classify` 400 재현 해소 확인
+
+### 20. AI 분류 단계진행 UX + 재검수 큐 보강 — `9b818b7`
+- [x] `POST /ocr/jobs/{job_id}/ai-classify/step` 추가로 문항 단위(1건) AI 분류 진행
+- [x] `raw_response.ai_classification` 진행요약(`processed/total/done/provider/model`) 저장 및 `GET /ocr/jobs` 노출 필드 확장
+- [x] 작업목록에서 AI 진행상황(`AI processed/total`, provider, 승인 수) 즉시 확인 UI 추가
+- [x] 작업목록 AI 분류 동작을 step-loop 방식으로 전환해 진행중 상태를 실시간 안내
+- [x] OCR 미리보기에서 LaTeX 텍스트를 `better-react-mathjax`로 렌더링하도록 개선
+- [x] `GET /problems`에 `ai_reviewed` 필터 및 AI 메타(provider/model) 노출 추가
+- [x] 검수 큐에 `AI 분류 문항만` 토글/배지/메타표시 추가로 사람 재검수 흐름 보강
+- [x] 검증 완료 (`ruff`, `compileall`, `web lint/build`, 실제 step/API 호출로 진행률 증가 확인)
