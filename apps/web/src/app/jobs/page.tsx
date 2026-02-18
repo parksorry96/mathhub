@@ -35,7 +35,8 @@ import PlaylistAddCheckRoundedIcon from "@mui/icons-material/PlaylistAddCheckRou
 import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
 import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
 import VisibilityRoundedIcon from "@mui/icons-material/VisibilityRounded";
-import { MathJax, MathJaxContext } from "better-react-mathjax";
+import { MathJaxContext } from "better-react-mathjax";
+import { ProblemStatementView } from "@/components/problem-statement-view";
 import type {
   ApiJobStatus,
   OcrJobAiClassifyStepResponse,
@@ -985,66 +986,15 @@ export default function JobsPage() {
                         ))}
                       </Box>
 
-                      {selectedPreviewQuestion.has_visual_asset && (
+                      {selectedPreviewQuestion.has_visual_asset && selectedPreviewQuestion.asset_previews.length > 0 && (
                         <Alert severity="info" sx={{ mb: 2 }}>
-                          그림/그래프/표 가능성이 감지되었습니다. 최종 검수 시 원본 페이지와 함께 확인하세요.
+                          그림/그래프/표가 문항과 함께 렌더링됩니다. 누락이 있으면 재동기화 후 재확인하세요.
                         </Alert>
                       )}
-
-                      {selectedPreviewQuestion.asset_previews.length > 0 && (
-                        <Box sx={{ mb: 2 }}>
-                          <Typography variant="caption" sx={{ color: "#9CB3C8", fontWeight: 600 }}>
-                            추출된 시각 자산 ({selectedPreviewQuestion.asset_previews.length})
-                          </Typography>
-                          <Box
-                            sx={{
-                              mt: 1,
-                              display: "grid",
-                              gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))",
-                              gap: 1,
-                            }}
-                          >
-                            {selectedPreviewQuestion.asset_previews.map((asset, idx) => (
-                              <Box
-                                key={`${selectedPreviewQuestion.candidate_key}-${asset.storage_key}-${idx}`}
-                                sx={{
-                                  border: "1px solid rgba(231,227,227,0.12)",
-                                  borderRadius: 1.5,
-                                  overflow: "hidden",
-                                  backgroundColor: "rgba(255,255,255,0.03)",
-                                }}
-                              >
-                                {asset.preview_url ? (
-                                  <Box
-                                    component="img"
-                                    src={asset.preview_url}
-                                    alt={`${asset.asset_type}-${idx + 1}`}
-                                    sx={{ width: "100%", height: 96, objectFit: "cover", display: "block" }}
-                                  />
-                                ) : (
-                                  <Box
-                                    sx={{
-                                      width: "100%",
-                                      height: 96,
-                                      display: "flex",
-                                      alignItems: "center",
-                                      justifyContent: "center",
-                                      color: "#7F8A93",
-                                      fontSize: 12,
-                                    }}
-                                  >
-                                    미리보기 불가
-                                  </Box>
-                                )}
-                                <Box sx={{ p: 0.75 }}>
-                                  <Typography variant="caption" sx={{ color: "#D4A574" }}>
-                                    {asset.asset_type}
-                                  </Typography>
-                                </Box>
-                              </Box>
-                            ))}
-                          </Box>
-                        </Box>
+                      {selectedPreviewQuestion.has_visual_asset && selectedPreviewQuestion.asset_previews.length === 0 && (
+                        <Alert severity="warning" sx={{ mb: 2 }}>
+                          시각 요소는 감지됐지만 추출 이미지가 없습니다. `문제 적재`를 다시 실행하면 자산을 재생성합니다.
+                        </Alert>
                       )}
 
                       <Box
@@ -1057,17 +1007,10 @@ export default function JobsPage() {
                           minHeight: 360,
                         }}
                       >
-                        <Box
-                          sx={{
-                            color: "#F5F7F8",
-                            whiteSpace: "pre-wrap",
-                            fontSize: { xs: 15, md: 17 },
-                            lineHeight: 1.95,
-                            letterSpacing: "0.005em",
-                          }}
-                        >
-                          <MathJax dynamic>{selectedPreviewQuestion.statement_text || "(본문 없음)"}</MathJax>
-                        </Box>
+                        <ProblemStatementView
+                          text={selectedPreviewQuestion.statement_text}
+                          assets={selectedPreviewQuestion.asset_previews}
+                        />
                       </Box>
                     </>
                   )}
