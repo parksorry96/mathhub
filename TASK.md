@@ -224,3 +224,10 @@
 - [x] line `type/subtype` 기반 그래프 힌트 강화 및 토큰 확장
 - [x] bbox에 source page dims 메타를 포함하고 자산 추출 시 좌표계 스케일 보정 로직 개선
 - [x] 검증 수행 (`ruff check`, `python -m compileall`, 함수 스모크 테스트)
+
+### 31. inline 이미지 단일화 + 그래프 OCR 잡음 제거 — `a265800`
+- [x] 문항 후보 추출 시 그래프/도표/이미지 노드 텍스트를 본문 조합에서 제외
+- [x] layout fallback 경로에서도 비주얼 노드를 제외한 텍스트를 우선 사용하도록 보강
+- [x] 문항 렌더러를 inline 이미지 방식으로 단일화(기존 별도 시각요소 그리드 제거)
+- [x] 이미지가 있는 문항에서 축 라벨/눈금 숫자(`x`,`y`,`1`,`2`,`y=f(x)` 등) 잡음 라인 제거 휴리스틱 추가
+- [x] 검증 수행 (`api ruff`, `api compileall`, `web lint`, `web build`, 스모크 테스트)
