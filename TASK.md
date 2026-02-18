@@ -209,3 +209,11 @@
 - [x] 검수 화면에서 문제 본문과 그래프/그림을 한 카드 내 동시 표시로 교체
 - [x] 시각요소 감지/추출 상태 안내 문구 개선(미추출 시 재적재 가이드)
 - [x] 검증 완료 (`pnpm --filter @mathhub/web lint`, `pnpm --filter @mathhub/web build`)
+
+### 29. 2단 문항구조 인식 + 문항별 그래프 자산 분리 저장 — `8330bd4`
+- [x] OCR `raw_payload.lines`의 `column/multiple_choice_block/chart` 구조를 이용해 2단 문항 후보 추출 로직 추가
+- [x] 후보별 bbox/레이아웃 메타(`split_strategy`, `layout_column`, `layout_mode`)를 AI 분류 결과에 저장
+- [x] 시각 자산 힌트를 후보 bbox와의 교집합 기준으로 필터링해 문항별 그래프 귀속 정확도 개선
+- [x] `materialize-problems`에서 기존 bbox 없는 후보도 레이아웃 재추출 fallback으로 candidate bbox 보강
+- [x] `chart/cnt/region` 좌표 파싱을 bbox 정규화(`x1,y1,x2,y2`)로 통일
+- [x] 검증 완료 (`ruff check`, `python -m compileall`, `pnpm --filter @mathhub/web lint`, `pnpm --filter @mathhub/web build`)
