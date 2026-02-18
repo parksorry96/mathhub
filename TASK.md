@@ -93,3 +93,12 @@
 - [x] 검수 페이지를 `GET /problems` + `PATCH /problems/{id}/review` 기반으로 전환
 - [x] 백엔드에 프론트용 목록/검수 API 추가 (`GET /ocr/jobs`, `GET /problems`, `PATCH /problems/{id}/review`)
 - [x] 정적 검증/빌드/통합 검증 완료 (web lint/build, api ruff/compile, end-to-end API 시나리오)
+
+### 12. S3 Presigned 업로드 흐름 추가 — `aff74fa`
+- [x] S3 설정 env getter 추가 (`S3_BUCKET`, `S3_REGION`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` 등)
+- [x] S3 서비스 추가 (`apps/api/app/services/s3_storage.py`: key 생성, storage_key 파싱, presigned PUT/GET)
+- [x] S3 presign API 추가 (`POST /storage/s3/presign-upload`)
+- [x] `mathpix/submit`에서 `storage_key=s3://bucket/key`일 때 presigned GET URL 자동 생성
+- [x] 웹 업로드 페이지를 `presign -> S3 PUT -> POST /ocr/jobs` 흐름으로 전환
+- [x] 웹 API 클라이언트에 S3 presign/PUT 유틸 추가 (`apps/web/src/lib/api.ts`)
+- [x] 정적 검증/빌드/통합 검증 완료 (api ruff/compile, web lint/build, temp DB 시나리오)
