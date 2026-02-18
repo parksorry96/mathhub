@@ -217,3 +217,10 @@
 - [x] `materialize-problems`에서 기존 bbox 없는 후보도 레이아웃 재추출 fallback으로 candidate bbox 보강
 - [x] `chart/cnt/region` 좌표 파싱을 bbox 정규화(`x1,y1,x2,y2`)로 통일
 - [x] 검증 완료 (`ruff check`, `python -m compileall`, `pnpm --filter @mathhub/web lint`, `pnpm --filter @mathhub/web build`)
+
+### 30. OCR 시각요소/그래프 인식 정확도 개선 — `c2a2114`
+- [x] Mathpix submit payload에 `include_diagram_text` 기본 활성화 및 요청 스키마 반영
+- [x] sync 완료 시 `lines.json` 항상 반영 + status/lines 페이지 병합으로 raw payload 보존 강화
+- [x] line `type/subtype` 기반 그래프 힌트 강화 및 토큰 확장
+- [x] bbox에 source page dims 메타를 포함하고 자산 추출 시 좌표계 스케일 보정 로직 개선
+- [x] 검증 수행 (`ruff check`, `python -m compileall`, 함수 스모크 테스트)
