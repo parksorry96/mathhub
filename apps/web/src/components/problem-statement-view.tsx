@@ -1,6 +1,6 @@
 "use client";
 
-import { Box, Typography } from "@mui/material";
+import { Box } from "@mui/material";
 import { MathJax } from "better-react-mathjax";
 
 function createImageRegexes() {
@@ -62,38 +62,63 @@ function stripInlineImageSyntax(text: string): string {
     .trim();
 }
 
+function isGraphArtifactLine(line: string): boolean {
+  const normalized = line.trim().replace(/\s+/g, "").replace(/−/g, "-");
+  if (!normalized) {
+    return false;
+  }
+  if (/^[+-]?\d+(?:\.\d+)?$/.test(normalized)) {
+    return true;
+  }
+  if (/^[xyo]$/i.test(normalized)) {
+    return true;
+  }
+  if (/^(x축|y축)$/i.test(normalized)) {
+    return true;
+  }
+  if (/^(y=f\(x\)|f\(x\))$/i.test(normalized)) {
+    return true;
+  }
+  return false;
+}
+
+function stripGraphArtifactLines(text: string, options: { hasVisualImages: boolean }): string {
+  const { hasVisualImages } = options;
+  if (!hasVisualImages) {
+    return text;
+  }
+
+  const lines = text.split(/\r?\n/);
+  const artifactCount = lines.filter((line) => isGraphArtifactLine(line)).length;
+  if (artifactCount < 4) {
+    // Guardrail: only strip when graph-noise signature is strong.
+    return text;
+  }
+
+  return lines
+    .filter((line) => !isGraphArtifactLine(line))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 export function ProblemStatementView({
   text,
   assets = [],
 }: ProblemStatementViewProps) {
   const sourceText = typeof text === "string" ? text : "";
   const inlineImageUrls = extractInlineImageUrls(sourceText);
-  const cleanedText = normalizeMathOperators(stripInlineImageSyntax(sourceText));
-
-  const mappedAssets = assets.map((asset, index) => ({
-    id: asset.id ?? `asset-${index + 1}`,
-    assetType: String(asset.asset_type || "image"),
-    previewUrl: asset.preview_url || null,
-    storageKey: asset.storage_key || null,
-    source: "asset" as const,
-  }));
-
-  const previewUrlSet = new Set(
-    mappedAssets
-      .map((asset) => asset.previewUrl)
-      .filter((url): url is string => typeof url === "string" && url.length > 0),
+  const assetPreviewUrls = dedupeStrings(
+    assets
+      .map((asset) => asset.preview_url)
+      .filter((url): url is string => typeof url === "string" && url.trim().length > 0),
   );
-  const inlineAssets = inlineImageUrls
-    .filter((url) => !previewUrlSet.has(url))
-    .map((url, index) => ({
-      id: `inline-${index + 1}`,
-      assetType: "image",
-      previewUrl: url,
-      storageKey: null,
-      source: "inline" as const,
-    }));
-
-  const renderAssets = [...mappedAssets, ...inlineAssets];
+  const renderImageUrls = dedupeStrings([...inlineImageUrls, ...assetPreviewUrls]);
+  const cleanedText = normalizeMathOperators(
+    stripGraphArtifactLines(stripInlineImageSyntax(sourceText), {
+      hasVisualImages: renderImageUrls.length > 0,
+    }),
+  );
 
   return (
     <Box>
@@ -109,64 +134,25 @@ export function ProblemStatementView({
         <MathJax dynamic>{cleanedText || "(본문 없음)"}</MathJax>
       </Box>
 
-      {renderAssets.length > 0 && (
-        <Box sx={{ mt: 2 }}>
-          <Typography variant="caption" sx={{ color: "#9CB3C8", fontWeight: 600 }}>
-            문항 시각 요소 ({renderAssets.length})
-          </Typography>
-          <Box
-            sx={{
-              mt: 1,
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))",
-              gap: 1,
-            }}
-          >
-            {renderAssets.map((asset) => (
-              <Box
-                key={String(asset.id)}
-                sx={{
-                  border: "1px solid rgba(231,227,227,0.12)",
-                  borderRadius: 1.5,
-                  overflow: "hidden",
-                  backgroundColor: "rgba(255,255,255,0.03)",
-                }}
-              >
-                {asset.previewUrl ? (
-                  <Box
-                    component="img"
-                    src={asset.previewUrl}
-                    alt={`${asset.assetType}-${asset.id}`}
-                    sx={{ width: "100%", height: 96, objectFit: "cover", display: "block" }}
-                  />
-                ) : (
-                  <Box
-                    sx={{
-                      width: "100%",
-                      height: 96,
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      color: "#7F8A93",
-                      fontSize: 12,
-                    }}
-                  >
-                    미리보기 불가
-                  </Box>
-                )}
-                <Box sx={{ p: 0.75, display: "flex", justifyContent: "space-between", gap: 1 }}>
-                  <Typography variant="caption" sx={{ color: "#D4A574" }}>
-                    {asset.assetType}
-                  </Typography>
-                  {asset.source === "inline" && (
-                    <Typography variant="caption" sx={{ color: "#7FA6C8" }}>
-                      inline
-                    </Typography>
-                  )}
-                </Box>
-              </Box>
-            ))}
-          </Box>
+      {renderImageUrls.length > 0 && (
+        <Box sx={{ mt: 2, display: "flex", flexDirection: "column", gap: 1.5 }}>
+          {renderImageUrls.map((url, index) => (
+            <Box
+              key={`inline-visual-${index + 1}`}
+              component="img"
+              src={url}
+              alt={`inline-visual-${index + 1}`}
+              sx={{
+                display: "block",
+                width: "100%",
+                maxHeight: { xs: 280, md: 420 },
+                objectFit: "contain",
+                border: "1px solid rgba(231,227,227,0.12)",
+                borderRadius: 1.5,
+                backgroundColor: "rgba(255,255,255,0.02)",
+              }}
+            />
+          ))}
         </Box>
       )}
     </Box>

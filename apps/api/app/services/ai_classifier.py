@@ -68,15 +68,31 @@ GRAPH_DIAGRAM_SUBTYPES = {
     "pie",
     "analytical",
 }
+VISUAL_NODE_TYPES = {
+    "image",
+    "figure",
+    "picture",
+    "diagram",
+    "chart",
+    "graph",
+    "axis",
+    "plot",
+    "table",
+    "table_cell",
+    "tabular",
+    "grid",
+}
 
 
 def extract_problem_candidates(text: str, page_raw_payload: dict | None = None) -> list[dict]:
+    fallback_text = text
     if isinstance(page_raw_payload, dict):
         structured = _extract_problem_candidates_from_layout(page_raw_payload)
         if structured:
             return structured
+        fallback_text = _extract_non_visual_page_text(page_raw_payload) or text
 
-    cleaned = text.strip()
+    cleaned = fallback_text.strip()
     if not cleaned:
         return []
 
@@ -99,6 +115,36 @@ def extract_problem_candidates(text: str, page_raw_payload: dict | None = None) 
             }
         )
     return candidates
+
+
+def _extract_non_visual_page_text(payload: dict) -> str | None:
+    lines_raw = payload.get("lines")
+    if not isinstance(lines_raw, list):
+        return None
+
+    source_dimensions = _resolve_source_dimensions(payload)
+    rows: list[tuple[float, float, str]] = []
+    for node in lines_raw:
+        if not isinstance(node, dict):
+            continue
+        node_type = str(node.get("type") or "").strip().lower()
+        if node_type in {"page_info", "column"}:
+            continue
+        if _is_visual_text_node(node):
+            continue
+        text = _extract_node_text(node)
+        if not text:
+            continue
+        bbox = _extract_bbox(node, source_dimensions=source_dimensions)
+        xyxy = _to_bbox_xyxy(bbox)
+        if xyxy:
+            x1, y1, _, _ = xyxy
+        else:
+            x1, y1 = (0.0, 0.0)
+        rows.append((y1, x1, text))
+
+    normalized_text = _rows_to_normalized_text(rows)
+    return normalized_text or None
 
 
 def _select_best_split_matches(text: str) -> tuple[list[re.Match], str]:
@@ -543,29 +589,23 @@ def _extract_node_text(node: dict) -> str:
     return ""
 
 
-def _build_statement_text(
-    nodes: list[dict],
-    *,
-    source_dimensions: tuple[float, float] | None = None,
-) -> str:
-    rows: list[tuple[float, float, str]] = []
-    for node in nodes:
-        if not isinstance(node, dict):
-            continue
-        node_type = str(node.get("type") or "").strip().lower()
-        if node_type in {"page_info", "column"}:
-            continue
-        text = _extract_node_text(node)
-        if not text:
-            continue
-        bbox = _extract_bbox(node, source_dimensions=source_dimensions)
-        xyxy = _to_bbox_xyxy(bbox)
-        if xyxy:
-            x1, y1, _, _ = xyxy
-        else:
-            x1, y1 = (0.0, 0.0)
-        rows.append((y1, x1, text))
+def _is_visual_text_node(node: dict) -> bool:
+    node_type = str(node.get("type") or "").strip().lower()
+    node_subtype = str(node.get("subtype") or "").strip().lower()
+    if node_type in VISUAL_NODE_TYPES or node_type in GRAPH_NODE_TYPES:
+        return True
+    if node_type == "diagram" and node_subtype in GRAPH_DIAGRAM_SUBTYPES:
+        return True
 
+    inferred_type = _infer_asset_type_from_node(node)
+    if inferred_type in {"graph", "image", "table"}:
+        # Treat geometric nodes as visual-only text candidates (axis labels/ticks/table cell OCR).
+        if node.get("bbox") is not None or node.get("cnt") is not None or node.get("region") is not None:
+            return True
+    return False
+
+
+def _rows_to_normalized_text(rows: list[tuple[float, float, str]]) -> str:
     if not rows:
         return ""
     rows.sort(key=lambda item: (item[0], item[1]))
@@ -580,6 +620,34 @@ def _build_statement_text(
     return "\n".join(deduped).strip()
 
 
+def _build_statement_text(
+    nodes: list[dict],
+    *,
+    source_dimensions: tuple[float, float] | None = None,
+) -> str:
+    rows: list[tuple[float, float, str]] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        node_type = str(node.get("type") or "").strip().lower()
+        if node_type in {"page_info", "column"}:
+            continue
+        if _is_visual_text_node(node):
+            continue
+        text = _extract_node_text(node)
+        if not text:
+            continue
+        bbox = _extract_bbox(node, source_dimensions=source_dimensions)
+        xyxy = _to_bbox_xyxy(bbox)
+        if xyxy:
+            x1, y1, _, _ = xyxy
+        else:
+            x1, y1 = (0.0, 0.0)
+        rows.append((y1, x1, text))
+
+    return _rows_to_normalized_text(rows)
+
+
 def _infer_candidate_no(
     nodes: list[dict],
     *,
@@ -588,6 +656,8 @@ def _infer_candidate_no(
     rows: list[tuple[float, float, str]] = []
     for node in nodes:
         if not isinstance(node, dict):
+            continue
+        if _is_visual_text_node(node):
             continue
         text = _extract_node_text(node)
         if not text:
