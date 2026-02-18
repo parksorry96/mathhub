@@ -25,6 +25,12 @@ export interface OcrJobListItem {
   original_filename: string;
   total_pages: number;
   processed_pages: number;
+  ai_done: boolean | null;
+  ai_total_candidates: number | null;
+  ai_candidates_processed: number | null;
+  ai_candidates_accepted: number | null;
+  ai_provider: string | null;
+  ai_model: string | null;
 }
 
 export interface OcrJobListResponse {
@@ -52,6 +58,20 @@ export interface OcrJobPagesResponse {
   offset: number;
 }
 
+export interface OcrJobAiClassifyStepResponse {
+  job_id: string;
+  done: boolean;
+  processed_in_call: number;
+  total_candidates: number;
+  candidates_processed: number;
+  candidates_accepted: number;
+  provider: string;
+  model: string;
+  current_page_no: number | null;
+  current_candidate_no: number | null;
+  current_candidate_provider: string | null;
+}
+
 export interface ProblemListItem {
   id: string;
   ocr_page_id: string | null;
@@ -71,6 +91,9 @@ export interface ProblemListItem {
   document_filename: string | null;
   review_status: "pending" | "approved" | "rejected";
   confidence: string | null;
+  ai_reviewed: boolean;
+  ai_provider: string | null;
+  ai_model: string | null;
   is_verified: boolean;
   created_at: string;
   updated_at: string;
@@ -135,7 +158,7 @@ export interface S3PresignUploadResponse {
 }
 
 interface RequestInitEx extends RequestInit {
-  query?: Record<string, string | number | undefined | null>;
+  query?: Record<string, string | number | boolean | undefined | null>;
 }
 
 function buildUrl(path: string, query?: RequestInitEx["query"]) {
@@ -252,6 +275,13 @@ export function classifyOcrJob(jobId: string, payload?: Record<string, unknown>)
   });
 }
 
+export function classifyOcrJobStep(jobId: string, payload?: Record<string, unknown>) {
+  return requestJson<OcrJobAiClassifyStepResponse>(`/ocr/jobs/${jobId}/ai-classify/step`, {
+    method: "POST",
+    body: JSON.stringify(payload ?? {}),
+  });
+}
+
 export function materializeProblems(jobId: string, payload?: Record<string, unknown>) {
   return requestJson(`/ocr/jobs/${jobId}/materialize-problems`, {
     method: "POST",
@@ -264,6 +294,7 @@ export function listProblems(params?: {
   offset?: number;
   q?: string;
   review_status?: "pending" | "approved" | "rejected";
+  ai_reviewed?: boolean;
 }) {
   return requestJson<ProblemListResponse>("/problems", {
     method: "GET",

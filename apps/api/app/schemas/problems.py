@@ -24,6 +24,9 @@ class ProblemListItem(BaseModel):
     document_filename: str | None
     review_status: str
     confidence: Decimal | None
+    ai_reviewed: bool
+    ai_provider: str | None
+    ai_model: str | None
     is_verified: bool
     created_at: datetime
     updated_at: datetime

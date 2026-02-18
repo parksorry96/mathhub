@@ -18,7 +18,13 @@ _REVIEW_STATUS_EXPR = (
 )
 
 
-def _build_problem_filters(*, q: str | None, review_status: str | None, include_review_status: bool) -> tuple[str, list]:
+def _build_problem_filters(
+    *,
+    q: str | None,
+    review_status: str | None,
+    ai_reviewed: bool | None,
+    include_review_status: bool,
+) -> tuple[str, list]:
     where_clauses: list[str] = []
     params: list = []
 
@@ -32,6 +38,11 @@ def _build_problem_filters(*, q: str | None, review_status: str | None, include_
         where_clauses.append(f"{_REVIEW_STATUS_EXPR} = %s")
         params.append(review_status)
 
+    if ai_reviewed is True:
+        where_clauses.append("COALESCE(p.metadata #>> '{ingest,source}', '') = 'ocr_ai_classification'")
+    elif ai_reviewed is False:
+        where_clauses.append("COALESCE(p.metadata #>> '{ingest,source}', '') <> 'ocr_ai_classification'")
+
     if not where_clauses:
         return "", params
     return f"WHERE {' AND '.join(where_clauses)}", params
@@ -43,6 +54,7 @@ def list_problems(
     offset: int = Query(default=0, ge=0),
     q: str | None = Query(default=None, max_length=200),
     review_status: str | None = Query(default=None),
+    ai_reviewed: bool | None = Query(default=None),
 ) -> ProblemListResponse:
     allowed_review_statuses = {"pending", "approved", "rejected"}
     if review_status and review_status not in allowed_review_statuses:
@@ -51,10 +63,16 @@ def list_problems(
             detail="review_status must be one of pending, approved, rejected",
         )
 
-    where_sql, params = _build_problem_filters(q=q, review_status=review_status, include_review_status=True)
+    where_sql, params = _build_problem_filters(
+        q=q,
+        review_status=review_status,
+        ai_reviewed=ai_reviewed,
+        include_review_status=True,
+    )
     count_where_sql, count_params = _build_problem_filters(
         q=q,
         review_status=review_status,
+        ai_reviewed=ai_reviewed,
         include_review_status=False,
     )
 
@@ -85,6 +103,9 @@ def list_problems(
                         THEN (p.metadata #>> '{{ingest,confidence}}')::numeric
                         ELSE NULL
                     END AS confidence,
+                    (COALESCE(p.metadata #>> '{{ingest,source}}', '') = 'ocr_ai_classification') AS ai_reviewed,
+                    NULLIF(p.metadata #>> '{{ingest,provider}}', '') AS ai_provider,
+                    NULLIF(p.metadata #>> '{{ingest,model}}', '') AS ai_model,
                     p.is_verified,
                     p.created_at,
                     p.updated_at

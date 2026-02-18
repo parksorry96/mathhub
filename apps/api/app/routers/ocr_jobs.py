@@ -22,6 +22,7 @@ from app.schemas.ocr_jobs import (
     OCRDocumentSummary,
     OCRJobAIClassifyRequest,
     OCRJobAIClassifyResponse,
+    OCRJobAIClassifyStepResponse,
     OCRJobCreateRequest,
     OCRJobCreateResponse,
     OCRJobDeleteResponse,
@@ -73,6 +74,23 @@ def _to_decimal(value) -> Decimal:
         return Decimal(str(value))
     except Exception:
         return Decimal("0")
+
+
+def _build_ai_candidate_output(*, candidate: dict, classified: dict) -> AICandidateClassification:
+    return AICandidateClassification(
+        candidate_no=int(candidate["candidate_no"]),
+        statement_text=candidate["statement_text"],
+        subject_code=classified["subject_code"],
+        unit_code=classified["unit_code"],
+        point_value=classified["point_value"],
+        source_category=classified["source_category"],
+        source_type=classified["source_type"],
+        validation_status=classified["validation_status"],
+        confidence=Decimal(str(classified["confidence"])),
+        reason=classified["reason"],
+        provider=classified["provider"],
+        model=classified["model"],
+    )
 
 
 def _resolve_mathpix_credentials(
@@ -197,7 +215,29 @@ def list_ocr_jobs(
                         WHEN COALESCE(j.raw_response #>> '{{mathpix_status,num_pages_completed}}', '') ~ '^[0-9]+$'
                             THEN (j.raw_response #>> '{{mathpix_status,num_pages_completed}}')::int
                         ELSE 0
-                    END AS processed_pages
+                    END AS processed_pages,
+                    CASE
+                        WHEN COALESCE(j.raw_response #>> '{{ai_classification,done}}', '') IN ('true', 'false')
+                            THEN (j.raw_response #>> '{{ai_classification,done}}')::boolean
+                        ELSE NULL
+                    END AS ai_done,
+                    CASE
+                        WHEN COALESCE(j.raw_response #>> '{{ai_classification,total_candidates}}', '') ~ '^[0-9]+$'
+                            THEN (j.raw_response #>> '{{ai_classification,total_candidates}}')::int
+                        ELSE NULL
+                    END AS ai_total_candidates,
+                    CASE
+                        WHEN COALESCE(j.raw_response #>> '{{ai_classification,candidates_processed}}', '') ~ '^[0-9]+$'
+                            THEN (j.raw_response #>> '{{ai_classification,candidates_processed}}')::int
+                        ELSE NULL
+                    END AS ai_candidates_processed,
+                    CASE
+                        WHEN COALESCE(j.raw_response #>> '{{ai_classification,candidates_accepted}}', '') ~ '^[0-9]+$'
+                            THEN (j.raw_response #>> '{{ai_classification,candidates_accepted}}')::int
+                        ELSE NULL
+                    END AS ai_candidates_accepted,
+                    NULLIF(j.raw_response #>> '{{ai_classification,provider}}', '') AS ai_provider,
+                    NULLIF(j.raw_response #>> '{{ai_classification,model}}', '') AS ai_model
                 FROM ocr_jobs j
                 JOIN ocr_documents d ON d.id = j.document_id
                 LEFT JOIN LATERAL (
@@ -825,20 +865,7 @@ def classify_ocr_job(job_id: UUID, payload: OCRJobAIClassifyRequest) -> OCRJobAI
                 if confidence >= payload.min_confidence:
                     candidates_accepted += 1
 
-                candidate_out = AICandidateClassification(
-                    candidate_no=candidate["candidate_no"],
-                    statement_text=candidate["statement_text"],
-                    subject_code=classified["subject_code"],
-                    unit_code=classified["unit_code"],
-                    point_value=classified["point_value"],
-                    source_category=classified["source_category"],
-                    source_type=classified["source_type"],
-                    validation_status=classified["validation_status"],
-                    confidence=confidence,
-                    reason=classified["reason"],
-                    provider=classified["provider"],
-                    model=classified["model"],
-                )
+                candidate_out = _build_ai_candidate_output(candidate=candidate, classified=classified)
                 classified_candidates.append(candidate_out)
                 candidates_processed += 1
                 if candidate_out.provider == "api":
@@ -896,6 +923,247 @@ def classify_ocr_job(job_id: UUID, payload: OCRJobAIClassifyRequest) -> OCRJobAI
         candidates_processed=candidates_processed,
         candidates_accepted=candidates_accepted,
         page_results=page_results,
+    )
+
+
+@router.post("/{job_id}/ai-classify/step", response_model=OCRJobAIClassifyStepResponse)
+def classify_ocr_job_step(job_id: UUID, payload: OCRJobAIClassifyRequest) -> OCRJobAIClassifyStepResponse:
+    api_key = payload.api_key or get_ai_api_key()
+    api_base_url = payload.api_base_url or get_ai_api_base_url()
+    model = payload.model or get_ai_model()
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM ocr_jobs WHERE id = %s", (str(job_id),))
+            job = cur.fetchone()
+            if not job:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"OCR job not found: {job_id}",
+                )
+
+            cur.execute(
+                """
+                SELECT id, page_no, extracted_text, extracted_latex, raw_payload
+                FROM ocr_pages
+                WHERE job_id = %s
+                ORDER BY page_no
+                LIMIT %s
+                """,
+                (str(job_id), payload.max_pages),
+            )
+            pages = cur.fetchall()
+
+        if not pages:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"No OCR pages available. Run /ocr/jobs/{job_id}/mathpix/sync and check /ocr/jobs/{job_id}/pages first.",
+            )
+
+        total_candidates = 0
+        candidates_processed = 0
+        candidates_accepted = 0
+        api_candidates = 0
+        pages_processed = 0
+
+        target_page = None
+        target_candidate = None
+        target_existing_candidates: list[dict] = []
+        target_had_candidates = False
+
+        for page in pages:
+            page_text = (page.get("extracted_text") or page.get("extracted_latex") or "").strip()
+            page_candidates = extract_problem_candidates(page_text)
+            total_candidates += len(page_candidates)
+
+            raw_payload = page.get("raw_payload") or {}
+            ai_classification = raw_payload.get("ai_classification") if isinstance(raw_payload, dict) else None
+            existing_candidates = ai_classification.get("candidates") if isinstance(ai_classification, dict) else None
+            existing_list = existing_candidates if isinstance(existing_candidates, list) else []
+            if existing_list:
+                pages_processed += 1
+
+            existing_candidate_no: set[int] = set()
+            for existing in existing_list:
+                if not isinstance(existing, dict):
+                    continue
+                try:
+                    existing_no = int(existing.get("candidate_no"))
+                except Exception:
+                    continue
+                existing_candidate_no.add(existing_no)
+                candidates_processed += 1
+
+                confidence = _to_decimal(existing.get("confidence"))
+                if confidence >= payload.min_confidence:
+                    candidates_accepted += 1
+
+                if existing.get("provider") == "api":
+                    api_candidates += 1
+
+            if target_candidate is None:
+                for candidate in page_candidates:
+                    candidate_no = int(candidate["candidate_no"])
+                    if candidate_no not in existing_candidate_no:
+                        target_page = page
+                        target_candidate = candidate
+                        target_existing_candidates = [item for item in existing_list if isinstance(item, dict)]
+                        target_had_candidates = bool(existing_list)
+                        break
+
+        if total_candidates == 0:
+            summary_payload = {
+                "provider": "heuristic",
+                "model": model,
+                "pages_processed": 0,
+                "candidates_processed": 0,
+                "candidates_accepted": 0,
+                "total_candidates": 0,
+                "done": True,
+            }
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE ocr_jobs
+                    SET raw_response = COALESCE(raw_response, '{}'::jsonb)
+                        || jsonb_build_object('ai_classification', %s::jsonb)
+                    WHERE id = %s
+                    """,
+                    (Json(summary_payload), str(job_id)),
+                )
+            conn.commit()
+            return OCRJobAIClassifyStepResponse(
+                job_id=job_id,
+                done=True,
+                processed_in_call=0,
+                total_candidates=0,
+                candidates_processed=0,
+                candidates_accepted=0,
+                provider="heuristic",
+                model=model,
+            )
+
+        if target_candidate is None or target_page is None:
+            final_provider = "api" if api_candidates > 0 else "heuristic"
+            summary_payload = {
+                "provider": final_provider,
+                "model": model,
+                "pages_processed": pages_processed,
+                "candidates_processed": candidates_processed,
+                "candidates_accepted": candidates_accepted,
+                "total_candidates": total_candidates,
+                "done": True,
+            }
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE ocr_jobs
+                    SET raw_response = COALESCE(raw_response, '{}'::jsonb)
+                        || jsonb_build_object('ai_classification', %s::jsonb)
+                    WHERE id = %s
+                    """,
+                    (Json(summary_payload), str(job_id)),
+                )
+            conn.commit()
+            return OCRJobAIClassifyStepResponse(
+                job_id=job_id,
+                done=True,
+                processed_in_call=0,
+                total_candidates=total_candidates,
+                candidates_processed=candidates_processed,
+                candidates_accepted=candidates_accepted,
+                provider=final_provider,
+                model=model,
+            )
+
+        classified = classify_candidate(
+            statement_text=target_candidate["statement_text"],
+            api_key=api_key,
+            api_base_url=api_base_url,
+            model=model,
+        )
+        candidate_out = _build_ai_candidate_output(candidate=target_candidate, classified=classified)
+
+        updated_candidates: list[dict] = []
+        replaced = False
+        for existing in target_existing_candidates:
+            try:
+                existing_no = int(existing.get("candidate_no"))
+            except Exception:
+                existing_no = None
+            if existing_no == candidate_out.candidate_no:
+                updated_candidates.append(candidate_out.model_dump())
+                replaced = True
+            else:
+                updated_candidates.append(existing)
+        if not replaced:
+            updated_candidates.append(candidate_out.model_dump())
+
+        updated_candidates.sort(key=lambda item: int(item.get("candidate_no", 0)))
+
+        page_ai_payload = {
+            "page_id": str(target_page["id"]),
+            "page_no": target_page["page_no"],
+            "candidate_count": len(updated_candidates),
+            "candidates": updated_candidates,
+        }
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE ocr_pages
+                SET
+                    raw_payload = COALESCE(raw_payload, '{}'::jsonb)
+                        || jsonb_build_object('ai_classification', %s::jsonb),
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (Json(_json_ready(page_ai_payload)), str(target_page["id"])),
+            )
+
+            # Progress summary is stored on job-level response for quick UI checks.
+            candidates_processed += 1
+            if candidate_out.confidence >= payload.min_confidence:
+                candidates_accepted += 1
+            if candidate_out.provider == "api":
+                api_candidates += 1
+            if not target_had_candidates:
+                pages_processed += 1
+
+            final_provider = "api" if api_candidates > 0 else "heuristic"
+            done = candidates_processed >= total_candidates
+            summary_payload = {
+                "provider": final_provider,
+                "model": model,
+                "pages_processed": pages_processed,
+                "candidates_processed": candidates_processed,
+                "candidates_accepted": candidates_accepted,
+                "total_candidates": total_candidates,
+                "done": done,
+            }
+            cur.execute(
+                """
+                UPDATE ocr_jobs
+                SET raw_response = COALESCE(raw_response, '{}'::jsonb)
+                    || jsonb_build_object('ai_classification', %s::jsonb)
+                WHERE id = %s
+                """,
+                (Json(summary_payload), str(job_id)),
+            )
+        conn.commit()
+
+    return OCRJobAIClassifyStepResponse(
+        job_id=job_id,
+        done=done,
+        processed_in_call=1,
+        total_candidates=total_candidates,
+        candidates_processed=candidates_processed,
+        candidates_accepted=candidates_accepted,
+        provider=final_provider,
+        model=model,
+        current_page_no=target_page["page_no"],
+        current_candidate_no=candidate_out.candidate_no,
+        current_candidate_provider=candidate_out.provider,
     )
 
 

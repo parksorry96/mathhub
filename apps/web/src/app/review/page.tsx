@@ -30,6 +30,7 @@ export default function ReviewPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [queue, setQueue] = useState<ProblemListItem[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
+  const [onlyAiReviewed, setOnlyAiReviewed] = useState(true);
 
   const loadQueue = useCallback(async () => {
     setLoading(true);
@@ -39,6 +40,7 @@ export default function ReviewPage() {
         limit: 100,
         offset: 0,
         review_status: "pending",
+        ai_reviewed: onlyAiReviewed ? true : undefined,
       });
       setQueue(res.items);
       setCurrentIndex((prev) => {
@@ -50,7 +52,7 @@ export default function ReviewPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [onlyAiReviewed]);
 
   useEffect(() => {
     void loadQueue();
@@ -91,6 +93,22 @@ export default function ReviewPage() {
           <Typography variant="body2" sx={{ color: "#919497", mt: 0.5 }}>
             실제 API(GET /problems, PATCH /problems/{"{id}"}/review) 기반 검수
           </Typography>
+          <Box sx={{ mt: 1.25, display: "flex", gap: 0.75 }}>
+            <Chip
+              label="AI 분류 문항만"
+              size="small"
+              clickable
+              onClick={() => setOnlyAiReviewed((prev) => !prev)}
+              variant={onlyAiReviewed ? "filled" : "outlined"}
+              sx={{
+                color: onlyAiReviewed ? "#7FB3FF" : "#919497",
+                backgroundColor: onlyAiReviewed ? "rgba(127,179,255,0.16)" : "transparent",
+                borderColor: "rgba(127,179,255,0.35)",
+                fontSize: 11,
+                height: 22,
+              }}
+            />
+          </Box>
         </Box>
         <Chip
           label={`${queue.length}건 대기`}
@@ -151,7 +169,19 @@ export default function ReviewPage() {
                       fontSize: 11,
                       height: 20,
                     }}
-                  />
+                    />
+                  {current.ai_reviewed && (
+                    <Chip
+                      label={`AI ${current.ai_provider ?? "heuristic"}`}
+                      size="small"
+                      sx={{
+                        color: "#7FB3FF",
+                        backgroundColor: "rgba(127,179,255,0.14)",
+                        fontSize: 11,
+                        height: 20,
+                      }}
+                    />
+                  )}
                 </Box>
                 <Box sx={{ display: "flex", gap: 0.5 }}>
                   <Button
@@ -317,6 +347,25 @@ export default function ReviewPage() {
                   </Typography>
                   <Typography variant="body2" sx={{ color: "#E7E3E3", fontSize: 13 }}>
                     {current.confidence ? `${current.confidence}%` : "정보 없음"}
+                  </Typography>
+                </Box>
+
+                <Box>
+                  <Typography
+                    variant="caption"
+                    sx={{
+                      color: "#919497",
+                      fontWeight: 500,
+                      display: "block",
+                      mb: 0.5,
+                    }}
+                  >
+                    AI 분류
+                  </Typography>
+                  <Typography variant="body2" sx={{ color: "#E7E3E3", fontSize: 13 }}>
+                    {current.ai_reviewed
+                      ? `${current.ai_provider ?? "heuristic"} / ${current.ai_model ?? "-"}`
+                      : "AI 분류 이력 없음"}
                   </Typography>
                 </Box>
               </Box>

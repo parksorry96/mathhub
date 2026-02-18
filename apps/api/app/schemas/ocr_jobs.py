@@ -94,6 +94,12 @@ class OCRJobListItem(BaseModel):
     original_filename: str
     total_pages: int
     processed_pages: int
+    ai_done: bool | None = None
+    ai_total_candidates: int | None = None
+    ai_candidates_processed: int | None = None
+    ai_candidates_accepted: int | None = None
+    ai_provider: str | None = None
+    ai_model: str | None = None
 
 
 class OCRJobListResponse(BaseModel):
@@ -142,6 +148,20 @@ class OCRJobAIClassifyResponse(BaseModel):
     candidates_processed: int
     candidates_accepted: int
     page_results: list[AIPageClassification]
+
+
+class OCRJobAIClassifyStepResponse(BaseModel):
+    job_id: UUID
+    done: bool
+    processed_in_call: int
+    total_candidates: int
+    candidates_processed: int
+    candidates_accepted: int
+    provider: str
+    model: str
+    current_page_no: int | None = None
+    current_candidate_no: int | None = None
+    current_candidate_provider: str | None = None
 
 
 class OCRJobMathpixSubmitRequest(BaseModel):

@@ -32,9 +32,10 @@ import SmartToyRoundedIcon from "@mui/icons-material/SmartToyRounded";
 import PlaylistAddCheckRoundedIcon from "@mui/icons-material/PlaylistAddCheckRounded";
 import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
 import VisibilityRoundedIcon from "@mui/icons-material/VisibilityRounded";
+import { MathJax, MathJaxContext } from "better-react-mathjax";
 import type { ApiJobStatus, OcrJobListItem, OcrPagePreviewItem } from "@/lib/api";
 import {
-  classifyOcrJob,
+  classifyOcrJobStep,
   deleteOcrJob,
   listOcrJobPages,
   listOcrJobs,
@@ -52,6 +53,13 @@ const statusConfig: Record<ApiJobStatus, { label: string; color: string; bg: str
   queued: { label: "대기", color: "#919497", bg: "rgba(145,148,151,0.1)" },
   failed: { label: "실패", color: "#C45C5C", bg: "rgba(196,92,92,0.12)" },
   cancelled: { label: "취소", color: "#C45C5C", bg: "rgba(196,92,92,0.12)" },
+};
+
+const mathJaxConfig = {
+  tex: {
+    inlineMath: [["\\(", "\\)"]],
+    displayMath: [["\\[", "\\]"]],
+  },
 };
 
 function formatDate(dateText: string) {
@@ -141,8 +149,36 @@ export default function JobsPage() {
           await syncMathpixJob(job.id, {});
           setNotice(`${job.original_filename}: Mathpix 상태 동기화 완료`);
         } else if (action === "classify") {
-          await classifyOcrJob(job.id, { max_pages: 50, min_confidence: 0 });
-          setNotice(`${job.original_filename}: AI 분류 완료`);
+          let latest: {
+            done: boolean;
+            total_candidates: number;
+            candidates_processed: number;
+            provider: string;
+            model: string;
+          } | null = null;
+          let attempts = 0;
+          const maxAttempts = 3000;
+          while (attempts < maxAttempts) {
+            const step = await classifyOcrJobStep(job.id, { max_pages: 50, min_confidence: 0 });
+            latest = step;
+            if (!step.done) {
+              const at = step.current_page_no && step.current_candidate_no ? ` (P${step.current_page_no}-C${step.current_candidate_no})` : "";
+              setNotice(
+                `${job.original_filename}: AI 분류 진행중 ${step.candidates_processed}/${step.total_candidates}${at}`,
+              );
+            }
+            if (step.done) break;
+            attempts += 1;
+          }
+          if (!latest) {
+            throw new Error("AI 분류 응답을 받지 못했습니다.");
+          }
+          if (!latest.done) {
+            throw new Error("AI 분류가 시간 내 완료되지 않았습니다. 다시 시도해주세요.");
+          }
+          setNotice(
+            `${job.original_filename}: AI 분류 완료 (${latest.provider}, ${latest.candidates_processed}/${latest.total_candidates})`,
+          );
         } else if (action === "materialize") {
           await materializeProblems(job.id, {
             curriculum_code: "CSAT_2027",
@@ -302,6 +338,13 @@ export default function JobsPage() {
                   const busy = runningAction[job.id];
                   const submitSourceSupported = isMathpixSubmitSourceSupported(job.storage_key);
                   const submitDisabled = Boolean(busy) || !!job.provider_job_id || !submitSourceSupported;
+                  const aiTotal = job.ai_total_candidates ?? 0;
+                  const aiProcessed = job.ai_candidates_processed ?? 0;
+                  const aiAccepted = job.ai_candidates_accepted ?? 0;
+                  const hasAiProgress =
+                    job.ai_done !== null ||
+                    job.ai_total_candidates !== null ||
+                    job.ai_candidates_processed !== null;
                   const submitTooltip = busy
                     ? "실행 중"
                     : !submitSourceSupported
@@ -344,6 +387,14 @@ export default function JobsPage() {
                         <Typography variant="caption" sx={{ color: "#919497" }}>
                           {job.processed_pages}/{job.total_pages || 0} 페이지 ({toNumber(job.progress_pct).toFixed(0)}%)
                         </Typography>
+                        {hasAiProgress && (
+                          <Typography variant="caption" sx={{ color: "#7FB3FF", display: "block", mt: 0.25 }}>
+                            AI {aiProcessed}/{aiTotal}
+                            {job.ai_done ? " 완료" : " 진행중"}
+                            {` · 승인 ${aiAccepted}`}
+                            {job.ai_provider ? ` · ${job.ai_provider}` : ""}
+                          </Typography>
+                        )}
                       </TableCell>
                       <TableCell>
                         <Typography variant="body2" sx={{ color: "#919497", fontSize: 13 }}>
@@ -469,30 +520,39 @@ export default function JobsPage() {
         <DialogContent sx={{ pt: 2 }}>
           {previewLoading && <Typography sx={{ color: "#919497" }}>불러오는 중...</Typography>}
           {!previewLoading && previewError && <Alert severity="warning">{previewError}</Alert>}
-          {!previewLoading &&
-            !previewError &&
-            previewPages.map((page) => (
-              <Box
-                key={page.id}
-                sx={{
-                  mb: 2,
-                  p: 2,
-                  border: "1px solid rgba(231,227,227,0.08)",
-                  borderRadius: 1.5,
-                  backgroundColor: "rgba(255,255,255,0.02)",
-                }}
-              >
-                <Typography variant="subtitle2" sx={{ color: "#E7E3E3", mb: 1 }}>
-                  페이지 {page.page_no}
-                </Typography>
-                <Typography
-                  variant="body2"
-                  sx={{ color: "#CFCFCF", whiteSpace: "pre-wrap", fontFamily: "monospace", fontSize: 12 }}
+          {!previewLoading && !previewError && (
+            <MathJaxContext config={mathJaxConfig}>
+              {previewPages.map((page) => (
+                <Box
+                  key={page.id}
+                  sx={{
+                    mb: 2,
+                    p: 2,
+                    border: "1px solid rgba(231,227,227,0.08)",
+                    borderRadius: 1.5,
+                    backgroundColor: "rgba(255,255,255,0.02)",
+                  }}
                 >
-                  {(page.extracted_text || page.extracted_latex || "").trim() || "(추출 텍스트 없음)"}
-                </Typography>
-              </Box>
-            ))}
+                  <Typography variant="subtitle2" sx={{ color: "#E7E3E3", mb: 1 }}>
+                    페이지 {page.page_no}
+                  </Typography>
+                  <Box
+                    sx={{
+                      color: "#CFCFCF",
+                      whiteSpace: "pre-wrap",
+                      fontFamily: "monospace",
+                      fontSize: 12,
+                      lineHeight: 1.7,
+                    }}
+                  >
+                    <MathJax dynamic>
+                      {(page.extracted_text || page.extracted_latex || "").trim() || "(추출 텍스트 없음)"}
+                    </MathJax>
+                  </Box>
+                </Box>
+              ))}
+            </MathJaxContext>
+          )}
         </DialogContent>
         <DialogActions sx={{ borderTop: "1px solid rgba(231,227,227,0.08)" }}>
           <Button onClick={() => setPreviewOpen(false)} sx={{ color: "#E7E3E3" }}>
