@@ -70,6 +70,11 @@ function toNumber(text: string) {
   return Number.isFinite(value) ? value : 0;
 }
 
+function isMathpixSubmitSourceSupported(storageKey: string) {
+  const key = storageKey.trim();
+  return key.startsWith("s3://") || key.startsWith("http://") || key.startsWith("https://");
+}
+
 export default function JobsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -255,6 +260,13 @@ export default function JobsPage() {
                 {jobs.map((job) => {
                   const status = statusConfig[job.status];
                   const busy = runningAction[job.id];
+                  const submitSourceSupported = isMathpixSubmitSourceSupported(job.storage_key);
+                  const submitDisabled = Boolean(busy) || !!job.provider_job_id || !submitSourceSupported;
+                  const submitTooltip = busy
+                    ? "실행 중"
+                    : !submitSourceSupported
+                      ? "이 작업은 legacy storage_key(upload://)라 제출할 수 없습니다. 새로 업로드 후 시도하세요."
+                      : "Mathpix 제출";
                   return (
                     <TableRow key={job.id} sx={{ "&:hover": { backgroundColor: "rgba(255,255,255,0.02)" } }}>
                       <TableCell>
@@ -305,12 +317,12 @@ export default function JobsPage() {
                       </TableCell>
                       <TableCell align="right">
                         <Box sx={{ display: "flex", justifyContent: "flex-end", gap: 0.5 }}>
-                          <Tooltip title={busy ? "실행 중" : "Mathpix 제출"}>
+                          <Tooltip title={submitTooltip}>
                             <span>
                               <IconButton
                                 size="small"
                                 sx={{ color: "#919497" }}
-                                disabled={Boolean(busy) || !!job.provider_job_id}
+                                disabled={submitDisabled}
                                 onClick={() => void runAction(job, "submit")}
                               >
                                 <CloudUploadRoundedIcon sx={{ fontSize: 16 }} />

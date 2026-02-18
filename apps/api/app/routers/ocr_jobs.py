@@ -120,6 +120,15 @@ def _resolve_mathpix_file_url(*, file_url: str | None, storage_key: str) -> str:
                 detail=f"Failed to generate S3 presigned GET URL: {exc}",
             ) from exc
 
+    if candidate.startswith("upload://"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "legacy storage_key scheme upload:// is not supported for Mathpix submit. "
+                "Re-upload the file through S3 flow and retry."
+            ),
+        )
+
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
         detail="file_url must be http(s) URL or storage_key must be s3://bucket/key",

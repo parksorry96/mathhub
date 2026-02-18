@@ -2,7 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class OCRJobCreateRequest(BaseModel):
@@ -12,6 +12,14 @@ class OCRJobCreateRequest(BaseModel):
     file_size_bytes: int = Field(gt=0)
     sha256: str = Field(pattern=r"^[a-fA-F0-9]{64}$")
     provider: str = Field(default="mathpix", min_length=1)
+
+    @field_validator("storage_key")
+    @classmethod
+    def validate_storage_key(cls, value: str) -> str:
+        candidate = value.strip()
+        if candidate.startswith(("s3://", "http://", "https://")):
+            return candidate
+        raise ValueError("storage_key must start with s3:// or http(s)://")
 
 
 class OCRJobCreateResponse(BaseModel):
