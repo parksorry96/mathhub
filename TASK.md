@@ -102,3 +102,7 @@
 - [x] 웹 업로드 페이지를 `presign -> S3 PUT -> POST /ocr/jobs` 흐름으로 전환
 - [x] 웹 API 클라이언트에 S3 presign/PUT 유틸 추가 (`apps/web/src/lib/api.ts`)
 - [x] 정적 검증/빌드/통합 검증 완료 (api ruff/compile, web lint/build, temp DB 시나리오)
+
+### 13. API 환경변수 샘플 추가 — `3883ae4`
+- [x] API 실행용 `.env.example` 추가 (`apps/api/.env.example`)
+- [x] Mathpix/AI/S3 필수 및 선택 환경변수 템플릿 정리
