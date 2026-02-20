@@ -63,6 +63,7 @@ class ProblemAssetExtractor:
         candidate_no: int,
         external_problem_key: str,
         asset_hints: list[dict],
+        candidate_bbox: dict | None = None,
     ) -> list[ExtractedAsset]:
         if not self.is_available or page_no <= 0:
             return []
@@ -82,7 +83,12 @@ class ProblemAssetExtractor:
             if asset_type not in {"image", "table", "graph", "other"}:
                 asset_type = "other"
 
-            clip_rect, normalized_bbox = _resolve_clip_rect(page=page, bbox=hint.get("bbox"))
+            hint_bbox = hint.get("bbox") if isinstance(hint.get("bbox"), dict) else None
+            fallback_bbox = candidate_bbox if isinstance(candidate_bbox, dict) else None
+            resolved_bbox = hint_bbox if hint_bbox is not None else fallback_bbox
+            clip_rect, normalized_bbox = _resolve_clip_rect(page=page, bbox=resolved_bbox)
+            if clip_rect is None:
+                continue
             matrix = pymupdf.Matrix(2.0, 2.0)
             pix = page.get_pixmap(matrix=matrix, clip=clip_rect, alpha=False)
             body = pix.tobytes("png")
@@ -110,6 +116,7 @@ class ProblemAssetExtractor:
                     metadata={
                         "source_hint": hint.get("source"),
                         "evidence": hint.get("evidence"),
+                        "bbox_source": "hint" if hint_bbox is not None else "candidate_fallback",
                         "external_problem_key": external_problem_key,
                         "render_scale": 2.0,
                     },

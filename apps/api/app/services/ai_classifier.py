@@ -200,35 +200,54 @@ def collect_problem_asset_hints(
 ) -> list[dict]:
     hints: list[dict] = []
     normalized = statement_text.strip().lower()
+    resolved_candidate_bbox = candidate_bbox if isinstance(candidate_bbox, dict) else None
     source_dimensions = (
         _resolve_source_dimensions(page_raw_payload) if isinstance(page_raw_payload, dict) else None
     )
 
+    statement_hints: list[dict] = []
     if normalized:
         for asset_type, keywords in TEXT_ASSET_KEYWORDS.items():
             matched = [keyword for keyword in keywords if keyword.lower() in normalized]
             if matched:
-                hints.append(
+                statement_hints.append(
                     {
                         "asset_type": asset_type,
                         "source": "statement_text",
-                        "bbox": None,
+                        # Keep statement-level hints local to the candidate when bbox exists.
+                        "bbox": resolved_candidate_bbox,
                         "evidence": matched,
                     }
                 )
 
     if isinstance(page_raw_payload, dict):
         payload_hints = _collect_payload_asset_hints(page_raw_payload, source_dimensions=source_dimensions)
-        if isinstance(candidate_bbox, dict):
-            payload_hints = _filter_asset_hints_by_candidate_bbox(payload_hints, candidate_bbox)
+        if resolved_candidate_bbox:
+            payload_hints = _filter_asset_hints_by_candidate_bbox(payload_hints, resolved_candidate_bbox)
+
+        precise_payload_types = {
+            str(item.get("asset_type")).strip().lower()
+            for item in payload_hints
+            if isinstance(item.get("bbox"), dict)
+        }
+        if precise_payload_types:
+            statement_hints = [
+                hint
+                for hint in statement_hints
+                if str(hint.get("asset_type")).strip().lower() not in precise_payload_types
+            ]
+
         hints.extend(payload_hints)
-        if candidate_bbox is None:
+        hints.extend(statement_hints)
+        if resolved_candidate_bbox is None and not payload_hints:
             hints.extend(_collect_payload_text_hints(page_raw_payload))
+    else:
+        hints.extend(statement_hints)
 
     # When OCR text strongly suggests a graph but payload lacks explicit graph nodes,
     # fallback to candidate bbox so extraction can still crop the local question area.
     if (
-        isinstance(candidate_bbox, dict)
+        isinstance(resolved_candidate_bbox, dict)
         and any(keyword.lower() in normalized for keyword in TEXT_ASSET_KEYWORDS["graph"])
         and not any(str(item.get("asset_type")) == "graph" for item in hints)
     ):
@@ -236,7 +255,7 @@ def collect_problem_asset_hints(
             {
                 "asset_type": "graph",
                 "source": "statement_text_bbox_fallback",
-                "bbox": candidate_bbox,
+                "bbox": resolved_candidate_bbox,
                 "evidence": ["keyword_graph"],
             }
         )

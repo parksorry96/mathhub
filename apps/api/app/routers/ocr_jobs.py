@@ -197,10 +197,11 @@ def _build_question_preview_items_for_page(
         if not split_strategy:
             split_strategy = "ai_classification" if isinstance(ai_candidates, list) else "numbered"
 
+        candidate_bbox = candidate.get("bbox") if isinstance(candidate.get("bbox"), dict) else None
         asset_hints = collect_problem_asset_hints(
             statement_text,
             raw_payload,
-            candidate_bbox=candidate.get("bbox") if isinstance(candidate.get("bbox"), dict) else None,
+            candidate_bbox=candidate_bbox,
         )
         asset_types = sorted(
             {
@@ -229,6 +230,7 @@ def _build_question_preview_items_for_page(
                     candidate_no=candidate_index,
                     external_problem_key=external_problem_key,
                     asset_hints=asset_hints,
+                    candidate_bbox=candidate_bbox,
                 )
                 generated_asset_previews = [
                     OCRQuestionAssetPreview(
@@ -1815,6 +1817,7 @@ def materialize_ocr_job_problems(
                                 candidate_no=candidate_no,
                                 external_problem_key=external_problem_key,
                                 asset_hints=asset_hints,
+                                candidate_bbox=candidate_bbox,
                             )
                         except Exception as exc:
                             asset_extractor_error = str(exc)
