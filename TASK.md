@@ -238,3 +238,10 @@
 - [x] `materialize-problems`가 AI 분류 결과가 없어도 OCR 후보 + 휴리스틱 분류로 문제를 적재하도록 확장
 - [x] AI 미실행 적재 문항은 `metadata.ingest.source=ocr_heuristic_materialize`로 기록해 AI 필터와 분리
 - [x] 검증 수행 (`api ruff`, `api compileall`, `web lint`, `web build`, 실 API 호출 검증)
+
+### 33. 그래프 자산 full-page 오추출 차단 + 힌트 우선순위 보강 — `8e4c686`
+- [x] `collect_problem_asset_hints`에서 statement 키워드 힌트를 candidate bbox와 결합하고 payload bbox 힌트와 충돌 시 payload 힌트를 우선하도록 조정
+- [x] `ProblemAssetExtractor.extract_and_upload`에 `candidate_bbox` fallback을 추가하고 clip bbox가 없으면 자산 추출을 건너뛰도록 변경(전체 페이지 crop 방지)
+- [x] preview/materialize 경로 모두 extractor 호출 시 candidate bbox를 전달하도록 라우터 연동
+- [x] 자산 힌트 회귀 테스트 3건 추가 (`apps/api/tests/test_ai_classifier_asset_hints.py`)
+- [x] 검증 수행 (`ruff check`, `pytest -q tests/test_ai_classifier_asset_hints.py`, `python -m compileall app tests`)
