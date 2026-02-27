@@ -280,3 +280,9 @@
 - [x] PDF 페이지 스캔을 병렬 실행(페이지 렌더링 스트리밍 + bounded worker)하도록 서비스 로직 개선
 - [x] Gemini generation config에 `candidateCount=1`, `maxOutputTokens` 제한, Flash용 `thinkingBudget` 적용
 - [x] 회귀 테스트 추가(생성 설정 speed 옵션 검증 2건) 및 전체 검증 수행 (`api ruff`, `api pytest`, `web lint`, `web build`)
+
+### 39. Gemini HTTP/2 의존성 폴백 복구 — `e527ed4`
+- [x] `h2` 패키지 미설치 환경에서 `http2=True`로 인한 전처리 실패를 재현하고 원인 확인
+- [x] Gemini HTTP 클라이언트 생성 시 `h2` 존재 여부를 검사해 HTTP/1.1로 자동 폴백하도록 수정
+- [x] 회귀 테스트 추가: `h2` 미설치 상황에서 `http2=False`로 클라이언트 생성되는지 검증
+- [x] 검증 수행 (`api ruff`, `pytest tests/test_gemini_document_scanner.py`, `reload 서버 /health 확인`)
