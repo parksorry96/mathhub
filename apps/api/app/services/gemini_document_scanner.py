@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import base64
 import json
+import random
 import re
+import time
 from decimal import Decimal
 
 import httpx
@@ -27,6 +29,11 @@ PAGE_TYPES = {
     "other",
 }
 ALLOWED_SUBJECT_CODES = {"MATH_I", "MATH_II", "PROB_STATS", "CALCULUS", "GEOMETRY"}
+_TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
+_MAX_GEMINI_RETRIES_PER_MODEL = 4
+_RETRY_BASE_DELAY_SECONDS = 0.8
+_RETRY_MAX_DELAY_SECONDS = 8.0
+_GEMINI_FALLBACK_MODEL = "gemini-2.5-flash"
 
 
 _GEMINI_RESPONSE_SCHEMA = {
@@ -103,7 +110,7 @@ def scan_pdf_document_with_gemini(
             page = doc[page_no - 1]
             pix = page.get_pixmap(matrix=pymupdf.Matrix(render_scale, render_scale), alpha=False)
             image_bytes = pix.tobytes("png")
-            result = _scan_page_with_gemini(
+            result, used_model = _scan_page_with_gemini(
                 image_bytes=image_bytes,
                 page_no=page_no,
                 api_key=api_key,
@@ -111,7 +118,7 @@ def scan_pdf_document_with_gemini(
                 model=model,
                 temperature=temperature,
             )
-            pages.append(_normalize_scanned_page(result, page_no=page_no, model=model))
+            pages.append(_normalize_scanned_page(result, page_no=page_no, model=used_model))
         return pages
     finally:
         doc.close()
@@ -164,6 +171,43 @@ def _scan_page_with_gemini(
     base_url: str,
     model: str,
     temperature: float,
+) -> tuple[dict, str]:
+    model_candidates = _build_model_candidates(model)
+    transient_failure: _GeminiTransientModelFailure | None = None
+    attempted_models: list[str] = []
+    for model_candidate in model_candidates:
+        try:
+            result = _scan_page_with_gemini_model(
+                image_bytes=image_bytes,
+                page_no=page_no,
+                api_key=api_key,
+                base_url=base_url,
+                model=model_candidate,
+                temperature=temperature,
+            )
+            return result, model_candidate
+        except _GeminiTransientModelFailure as exc:
+            transient_failure = exc
+            attempted_models.append(model_candidate)
+            continue
+
+    if transient_failure:
+        attempted = ", ".join(attempted_models)
+        raise RuntimeError(
+            f"Gemini transient failure on page {page_no} after retries "
+            f"(attempted models: {attempted}): {transient_failure}"
+        ) from transient_failure
+    raise RuntimeError(f"Gemini scan failed on page {page_no}")
+
+
+def _scan_page_with_gemini_model(
+    *,
+    image_bytes: bytes,
+    page_no: int,
+    api_key: str,
+    base_url: str,
+    model: str,
+    temperature: float,
 ) -> dict:
     prompt = (
         "You analyze one textbook page image for Korean high-school math ingestion.\n"
@@ -200,18 +244,43 @@ def _scan_page_with_gemini(
         },
     }
 
-    with httpx.Client(timeout=90.0) as client:
-        response = client.post(
-            url,
-            headers={
-                "x-goog-api-key": api_key,
-                "Content-Type": "application/json",
-            },
-            json=payload,
-        )
-        response.raise_for_status()
-        data = response.json()
+    last_status: int | None = None
+    for attempt in range(1, _MAX_GEMINI_RETRIES_PER_MODEL + 1):
+        try:
+            with httpx.Client(timeout=90.0) as client:
+                response = client.post(
+                    url,
+                    headers={
+                        "x-goog-api-key": api_key,
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+                response.raise_for_status()
+                data = response.json()
+            return _parse_gemini_response_payload(data)
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            if status_code not in _TRANSIENT_STATUS_CODES:
+                raise
+            last_status = status_code
+            if attempt >= _MAX_GEMINI_RETRIES_PER_MODEL:
+                break
+            _sleep_before_retry(attempt=attempt, retry_after=exc.response.headers.get("retry-after"))
+        except httpx.RequestError:
+            if attempt >= _MAX_GEMINI_RETRIES_PER_MODEL:
+                break
+            _sleep_before_retry(attempt=attempt, retry_after=None)
 
+    raise _GeminiTransientModelFailure(
+        page_no=page_no,
+        model=model,
+        max_attempts=_MAX_GEMINI_RETRIES_PER_MODEL,
+        last_status=last_status,
+    )
+
+
+def _parse_gemini_response_payload(data: dict) -> dict:
     text = _extract_gemini_text(data)
     if not text:
         return {}
@@ -225,6 +294,45 @@ def _scan_page_with_gemini(
             return json.loads(match.group(0))
         except Exception:
             return {}
+
+
+def _build_model_candidates(primary_model: str) -> list[str]:
+    candidates: list[str] = []
+    normalized_primary = primary_model.strip()
+    if normalized_primary:
+        candidates.append(normalized_primary)
+    if _GEMINI_FALLBACK_MODEL not in candidates:
+        candidates.append(_GEMINI_FALLBACK_MODEL)
+    return candidates
+
+
+def _sleep_before_retry(*, attempt: int, retry_after: str | None) -> None:
+    delay = _parse_retry_after(retry_after)
+    if delay is None:
+        delay = min(_RETRY_MAX_DELAY_SECONDS, _RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1)))
+    delay += random.uniform(0, 0.25)
+    time.sleep(delay)
+
+
+def _parse_retry_after(retry_after: str | None) -> float | None:
+    if retry_after is None:
+        return None
+    stripped = retry_after.strip()
+    if not stripped:
+        return None
+    try:
+        parsed = float(stripped)
+    except Exception:
+        return None
+    return max(0.0, min(parsed, _RETRY_MAX_DELAY_SECONDS))
+
+
+class _GeminiTransientModelFailure(RuntimeError):
+    def __init__(self, *, page_no: int, model: str, max_attempts: int, last_status: int | None):
+        status_label = str(last_status) if last_status is not None else "request-error"
+        super().__init__(
+            f"page={page_no}, model={model}, attempts={max_attempts}, last_status={status_label}"
+        )
 
 
 def _extract_gemini_text(data: dict) -> str:
