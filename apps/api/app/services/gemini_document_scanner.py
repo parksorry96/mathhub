@@ -61,6 +61,13 @@ _GEMINI_RESPONSE_SCHEMA = {
                     "problem_type": {"type": "string"},
                     "answer_key": {"type": "string"},
                     "has_visual_asset": {"type": "boolean"},
+                    "visual_asset_types": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["image", "graph", "table", "other"],
+                        },
+                    },
                     "confidence": {"type": "number"},
                     "bbox": {
                         "type": "object",
@@ -361,8 +368,9 @@ def _scan_page_with_gemini_model(
         "1) classify page_type as cover/toc/concept/problem/answer/explanation/mixed/other.\n"
         "2) extract problem candidates only when they are real question statements.\n"
         "3) for each problem, provide normalized bbox ratios x0_ratio,y0_ratio,x1_ratio,y1_ratio in [0,1].\n"
-        "4) if answer keys are visible (answer/explanation pages), extract answer_candidates as {question_no, answer_key}.\n"
-        "5) use subject_code only from MATH_I,MATH_II,PROB_STATS,CALCULUS,GEOMETRY when inferable.\n"
+        "4) classify visual_asset_types per problem using image/graph/table/other, and set has_visual_asset.\n"
+        "5) if answer keys are visible (answer/explanation pages), extract answer_candidates as {question_no, answer_key}.\n"
+        "6) use subject_code only from MATH_I,MATH_II,PROB_STATS,CALCULUS,GEOMETRY when inferable.\n"
         f"Current page number: {page_no}"
     )
     image_b64 = base64.b64encode(image_bytes).decode("ascii")
@@ -601,7 +609,10 @@ def _normalize_problem_item(item: object, *, fallback_index: int, model: str) ->
 
     problem_type = str(item.get("problem_type") or "").strip() or None
     answer_key = _normalize_answer_key(item.get("answer_key"))
-    has_visual_asset = bool(item.get("has_visual_asset"))
+    visual_asset_types = _normalize_visual_asset_types(item.get("visual_asset_types"))
+    has_visual_asset = bool(item.get("has_visual_asset")) or bool(visual_asset_types)
+    if has_visual_asset and not visual_asset_types:
+        visual_asset_types = ["other"]
     confidence = _to_confidence(item.get("confidence"))
 
     return {
@@ -614,6 +625,7 @@ def _normalize_problem_item(item: object, *, fallback_index: int, model: str) ->
         "problem_type": problem_type,
         "answer_key": answer_key,
         "has_visual_asset": has_visual_asset,
+        "visual_asset_types": visual_asset_types,
         "confidence": confidence,
         "validation_status": "needs_review",
         "provider": "gemini",
@@ -697,6 +709,26 @@ def _to_positive_int(value: object) -> int | None:
     if parsed > 0:
         return parsed
     return None
+
+
+def _normalize_visual_asset_types(value: object) -> list[str]:
+    allowed = {"image", "graph", "table", "other"}
+    if not isinstance(value, list):
+        return []
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        asset_type = str(item).strip().lower()
+        if not asset_type:
+            continue
+        if asset_type not in allowed:
+            asset_type = "other"
+        if asset_type in seen:
+            continue
+        seen.add(asset_type)
+        normalized.append(asset_type)
+    return normalized
 
 
 def _clamp01(value: float) -> float:

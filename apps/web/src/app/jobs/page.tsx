@@ -402,11 +402,11 @@ export default function JobsPage() {
           setNotice(`${job.original_filename}: AI 페이지 스캔 시작`);
           const preprocessed = await preprocessOcrJobWithAi(job.id, {
             max_pages: 500,
-            render_scale: 1.35,
-            temperature: 0.1,
-            max_parallel_pages: 3,
-            max_output_tokens: 2048,
-            thinking_budget: 0,
+            render_scale: 1.7,
+            temperature: 0,
+            max_parallel_pages: 2,
+            max_output_tokens: 8192,
+            thinking_budget: 1024,
           });
           setNotice(
             `${job.original_filename}: AI 스캔 완료 (페이지 ${preprocessed.scanned_pages}, 문항 ${preprocessed.detected_problems}, 정답매칭 ${preprocessed.matched_answers})`,

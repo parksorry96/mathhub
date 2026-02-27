@@ -219,6 +219,7 @@ def _build_question_preview_items_for_page(
             statement_text,
             raw_payload,
             candidate_bbox=candidate_bbox,
+            candidate_meta=candidate,
         )
         asset_types = sorted(
             {
@@ -330,6 +331,26 @@ def _resolve_problem_text_from_mathpix(*, extracted_text: str | None, extracted_
     if latex:
         return latex
     return None
+
+
+def _normalize_visual_asset_types(value: object, *, has_visual_asset: bool = False) -> list[str]:
+    allowed = {"image", "table", "graph", "other"}
+    normalized: list[str] = []
+    seen: set[str] = set()
+    if isinstance(value, list):
+        for item in value:
+            asset_type = str(item).strip().lower()
+            if not asset_type:
+                continue
+            if asset_type not in allowed:
+                asset_type = "other"
+            if asset_type in seen:
+                continue
+            seen.add(asset_type)
+            normalized.append(asset_type)
+    if not normalized and has_visual_asset:
+        normalized.append("other")
+    return normalized
 
 
 def _resolve_mathpix_credentials(
@@ -975,8 +996,46 @@ def preprocess_ocr_job_with_ai(
                 detail=f"OCR job not found: {job_id}",
             )
 
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE ocr_jobs
+                SET
+                    status = 'processing',
+                    progress_pct = CASE WHEN progress_pct < 5 THEN 5 ELSE progress_pct END,
+                    started_at = COALESCE(started_at, NOW()),
+                    finished_at = NULL,
+                    error_code = NULL,
+                    error_message = NULL
+                WHERE id = %s
+                """,
+                (str(job_id),),
+            )
+        conn.commit()
+
+        def mark_preprocess_failed(message: str) -> None:
+            try:
+                conn.rollback()
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE ocr_jobs
+                        SET
+                            status = 'failed',
+                            error_code = 'AI_PREPROCESS_ERROR',
+                            error_message = %s,
+                            finished_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (message, str(job_id)),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+
         document_storage_key = str(job.get("document_storage_key") or "").strip()
         if not document_storage_key.startswith("s3://"):
+            mark_preprocess_failed("ai-preprocess requires document storage_key in s3:// format")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="ai-preprocess requires document storage_key in s3:// format",
@@ -991,6 +1050,7 @@ def preprocess_ocr_job_with_ai(
                 key=source_key,
             )
         except Exception as exc:
+            mark_preprocess_failed(f"Failed to read source PDF for ai-preprocess: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=f"Failed to read source PDF for ai-preprocess: {exc}",
@@ -1012,6 +1072,7 @@ def preprocess_ocr_job_with_ai(
                 ),
             )
         except Exception as exc:
+            mark_preprocess_failed(f"Gemini preprocess request failed: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=f"Gemini preprocess request failed: {exc}",
@@ -1081,8 +1142,11 @@ def preprocess_ocr_job_with_ai(
             cur.execute(
                 """
                 UPDATE ocr_jobs
-                SET raw_response = COALESCE(raw_response, '{}'::jsonb)
-                    || jsonb_build_object('ai_preprocess', %s::jsonb)
+                SET
+                    status = 'processing',
+                    progress_pct = CASE WHEN progress_pct < 35 THEN 35 ELSE progress_pct END,
+                    raw_response = COALESCE(raw_response, '{}'::jsonb)
+                        || jsonb_build_object('ai_preprocess', %s::jsonb)
                 WHERE id = %s
                 """,
                 (Json(_json_ready(preprocess_summary)), str(job_id)),
@@ -1278,6 +1342,19 @@ def run_problem_level_ocr_pipeline(
         skipped_count = 0
         matched_answers = 0
         results: list[MaterializedProblemResult] = []
+        total_candidates_target = 0
+        for page in pages:
+            raw_payload = page.get("raw_payload")
+            if not isinstance(raw_payload, dict):
+                continue
+            ai_preprocess = raw_payload.get("ai_preprocess")
+            if not isinstance(ai_preprocess, dict):
+                continue
+            problems = ai_preprocess.get("problems")
+            if not isinstance(problems, list):
+                continue
+            total_candidates_target += len(problems)
+        total_candidates_target = max(1, min(total_candidates_target, int(payload.max_problems)))
 
         with conn.cursor() as cur:
             cur.execute(
@@ -1285,7 +1362,7 @@ def run_problem_level_ocr_pipeline(
                 UPDATE ocr_jobs
                 SET
                     status = 'processing',
-                    progress_pct = 10,
+                    progress_pct = CASE WHEN progress_pct < 40 THEN 40 ELSE progress_pct END,
                     started_at = COALESCE(started_at, NOW()),
                     finished_at = NULL,
                     error_code = NULL,
@@ -1470,6 +1547,10 @@ def run_problem_level_ocr_pipeline(
                     if candidate.get("answer_source") == "answer_page":
                         matched_answers += 1
 
+                    visual_asset_types = _normalize_visual_asset_types(
+                        candidate.get("visual_asset_types"),
+                        has_visual_asset=bool(candidate.get("has_visual_asset")),
+                    )
                     metadata = {
                         "needs_review": True,
                         "ingest": {
@@ -1483,6 +1564,10 @@ def run_problem_level_ocr_pipeline(
                             "problem_type": candidate.get("problem_type"),
                             "question_no": candidate.get("question_no"),
                             "answer_source": candidate.get("answer_source"),
+                        },
+                        "visual_assets": {
+                            "has_visual_asset": bool(candidate.get("has_visual_asset")) or bool(visual_asset_types),
+                            "types": visual_asset_types,
                         },
                         "ocr": {
                             "mathpix_text": extracted_text,
@@ -1619,6 +1704,18 @@ def run_problem_level_ocr_pipeline(
                         WHERE id = %s
                         """,
                         (str(page["id"]),),
+                    )
+                    progress_ratio = min(Decimal(processed_candidates) / Decimal(total_candidates_target), Decimal("1"))
+                    progress_pct = Decimal("40") + (Decimal("55") * progress_ratio)
+                    cur.execute(
+                        """
+                        UPDATE ocr_jobs
+                        SET
+                            status = 'processing',
+                            progress_pct = %s
+                        WHERE id = %s
+                        """,
+                        (progress_pct, str(job_id)),
                     )
 
             with conn.cursor() as cur:
@@ -2617,6 +2714,7 @@ def materialize_ocr_job_problems(
                         statement_text,
                         raw_payload,
                         candidate_bbox=candidate_bbox,
+                        candidate_meta=candidate,
                     )
                     asset_types = sorted(
                         {

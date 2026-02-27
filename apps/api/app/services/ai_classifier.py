@@ -243,6 +243,7 @@ def collect_problem_asset_hints(
     page_raw_payload: dict | None = None,
     *,
     candidate_bbox: dict | None = None,
+    candidate_meta: dict | None = None,
 ) -> list[dict]:
     hints: list[dict] = []
     normalized = statement_text.strip().lower()
@@ -250,6 +251,19 @@ def collect_problem_asset_hints(
     source_dimensions = (
         _resolve_source_dimensions(page_raw_payload) if isinstance(page_raw_payload, dict) else None
     )
+    candidate_visual_types = _extract_candidate_visual_asset_types(candidate_meta)
+    if candidate_visual_types:
+        hints.extend(
+            [
+                {
+                    "asset_type": asset_type,
+                    "source": "ai_candidate_type",
+                    "bbox": resolved_candidate_bbox,
+                    "evidence": ["visual_asset_types"],
+                }
+                for asset_type in candidate_visual_types
+            ]
+        )
 
     statement_hints: list[dict] = []
     if normalized:
@@ -307,6 +321,29 @@ def collect_problem_asset_hints(
         )
 
     return _dedupe_asset_hints(hints)
+
+
+def _extract_candidate_visual_asset_types(candidate_meta: dict | None) -> list[str]:
+    if not isinstance(candidate_meta, dict):
+        return []
+    allowed = {"image", "graph", "table", "other"}
+    raw_types = candidate_meta.get("visual_asset_types")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    if isinstance(raw_types, list):
+        for item in raw_types:
+            asset_type = str(item).strip().lower()
+            if not asset_type:
+                continue
+            if asset_type not in allowed:
+                asset_type = "other"
+            if asset_type in seen:
+                continue
+            seen.add(asset_type)
+            normalized.append(asset_type)
+    if not normalized and bool(candidate_meta.get("has_visual_asset")):
+        normalized.append("other")
+    return normalized
 
 
 def _collect_payload_text_hints(payload: dict) -> list[dict]:

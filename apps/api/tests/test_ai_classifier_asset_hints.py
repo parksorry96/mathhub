@@ -44,6 +44,22 @@ def test_extract_problem_candidates_dedupes_ai_preprocess_candidate_numbers():
     assert [item["candidate_no"] for item in candidates] == [1, 2, 3, 4, 5]
 
 
+def test_collect_problem_asset_hints_uses_ai_candidate_visual_types():
+    candidate_bbox = {"x1": 200, "y1": 240, "x2": 680, "y2": 820}
+
+    hints = collect_problem_asset_hints(
+        "문항을 풀이하시오.",
+        {},
+        candidate_bbox=candidate_bbox,
+        candidate_meta={"has_visual_asset": True, "visual_asset_types": ["graph", "table"]},
+    )
+
+    ai_type_hints = [item for item in hints if item.get("source") == "ai_candidate_type"]
+    assert len(ai_type_hints) == 2
+    assert {item.get("asset_type") for item in ai_type_hints} == {"graph", "table"}
+    assert all(item.get("bbox") == candidate_bbox for item in ai_type_hints)
+
+
 def test_collect_problem_asset_hints_prefers_payload_bbox_over_statement_hint():
     payload = {
         "page_width": 1000,

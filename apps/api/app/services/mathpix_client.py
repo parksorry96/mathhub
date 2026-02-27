@@ -1,7 +1,12 @@
 import json
+import random
+import time
 from decimal import Decimal
 
 import httpx
+
+_TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
+_MAX_MATHPIX_RETRIES = 3
 
 
 def submit_mathpix_pdf(
@@ -56,29 +61,42 @@ def ocr_mathpix_image(
     content_type: str = "image/png",
     options: dict | None = None,
 ) -> dict:
-    options_json = options or {"formats": ["text", "latex_styled"]}
+    options_json = options or {"formats": ["text", "latex_styled", "data"]}
     with httpx.Client(timeout=60.0) as client:
-        response = client.post(
-            f"{base_url.rstrip('/')}/text",
-            headers={
-                "app_id": app_id,
-                "app_key": app_key,
-            },
-            files={
-                "file": (image_filename, image_bytes, content_type),
-                "options_json": (None, json.dumps(options_json), "application/json"),
-            },
-        )
-        response.raise_for_status()
-        data = response.json()
-        if data.get("error") or data.get("error_info"):
-            error_message = data.get("error")
-            if not error_message and isinstance(data.get("error_info"), dict):
-                error_message = data["error_info"].get("message") or data["error_info"].get("id")
-            if not error_message:
-                error_message = json.dumps(data.get("error_info"), ensure_ascii=False)
-            raise RuntimeError(f"Mathpix text OCR error: {error_message}")
-        return data
+        for attempt in range(1, _MAX_MATHPIX_RETRIES + 1):
+            try:
+                response = client.post(
+                    f"{base_url.rstrip('/')}/text",
+                    headers={
+                        "app_id": app_id,
+                        "app_key": app_key,
+                    },
+                    files={
+                        "file": (image_filename, image_bytes, content_type),
+                        "options_json": (None, json.dumps(options_json), "application/json"),
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
+                if data.get("error") or data.get("error_info"):
+                    error_message = data.get("error")
+                    if not error_message and isinstance(data.get("error_info"), dict):
+                        error_message = data["error_info"].get("message") or data["error_info"].get("id")
+                    if not error_message:
+                        error_message = json.dumps(data.get("error_info"), ensure_ascii=False)
+                    raise RuntimeError(f"Mathpix text OCR error: {error_message}")
+                return data
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                if status_code not in _TRANSIENT_STATUS_CODES or attempt >= _MAX_MATHPIX_RETRIES:
+                    raise
+                _sleep_before_retry(attempt=attempt, retry_after=exc.response.headers.get("retry-after"))
+            except httpx.RequestError:
+                if attempt >= _MAX_MATHPIX_RETRIES:
+                    raise
+                _sleep_before_retry(attempt=attempt, retry_after=None)
+
+    raise RuntimeError("Mathpix text OCR failed after retries")
 
 
 def fetch_mathpix_pdf_status(
@@ -377,3 +395,24 @@ def _first_non_empty_str(source: dict, keys: tuple[str, ...]) -> str | None:
             if stripped:
                 return stripped
     return None
+
+
+def _sleep_before_retry(*, attempt: int, retry_after: str | None) -> None:
+    delay = _parse_retry_after(retry_after)
+    if delay is None:
+        delay = min(6.0, 0.6 * (2 ** (attempt - 1)))
+    delay += random.uniform(0, 0.2)
+    time.sleep(delay)
+
+
+def _parse_retry_after(retry_after: str | None) -> float | None:
+    if retry_after is None:
+        return None
+    stripped = retry_after.strip()
+    if not stripped:
+        return None
+    try:
+        parsed = float(stripped)
+    except Exception:
+        return None
+    return max(0.0, min(parsed, 10.0))

@@ -73,7 +73,8 @@ def get_gemini_model() -> str:
 
 
 def get_gemini_preprocess_model() -> str:
-    return _get_env("GEMINI_PREPROCESS_MODEL") or "gemini-2.5-flash"
+    # Keep preprocess model aligned with GEMINI_MODEL unless explicitly overridden.
+    return _get_env("GEMINI_PREPROCESS_MODEL") or get_gemini_model()
 
 
 def get_s3_bucket() -> str | None:

@@ -64,6 +64,24 @@ def test_normalize_problem_item_clamps_bbox_and_subject_code():
     assert normalized["bbox"]["x1_ratio"] == 1.0
 
 
+def test_normalize_problem_item_keeps_visual_asset_types():
+    normalized = _normalize_problem_item(
+        {
+            "candidate_no": 2,
+            "statement_text": "그래프와 표를 보고 답하시오.",
+            "bbox": {"x0_ratio": 0.2, "y0_ratio": 0.2, "x1_ratio": 0.8, "y1_ratio": 0.9},
+            "has_visual_asset": True,
+            "visual_asset_types": ["graph", "table", "unknown", "graph"],
+        },
+        fallback_index=1,
+        model="gemini-test",
+    )
+
+    assert normalized is not None
+    assert normalized["has_visual_asset"] is True
+    assert normalized["visual_asset_types"] == ["graph", "table", "other"]
+
+
 def test_scan_page_with_gemini_retries_on_503_then_succeeds(monkeypatch):
     calls: list[str] = []
 
