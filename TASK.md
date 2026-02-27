@@ -266,3 +266,10 @@
 - [x] 기존 세부 액션(`제출`, `동기화`, `AI 분류`, `문제 적재`, `삭제`)은 `상세 작업` 오버플로우 메뉴로 이동
 - [x] 삭제 확인창은 상세 메뉴 경유 시에도 유지되도록 동작 보존
 - [x] 검증 수행 (`pnpm --filter @mathhub/web lint`, `pnpm --filter @mathhub/web build`)
+
+### 37. Gemini 전처리 503 복구(재시도 + 모델 폴백) — `4751847`
+- [x] Gemini 페이지 스캔 요청에 `429/5xx` 지수 백오프 재시도 로직 추가
+- [x] `gemini-2.5-pro` 요청이 일시 실패할 때 `gemini-2.5-flash` 폴백 경로 추가
+- [x] 페이지별 실제 사용 모델을 문제 후보 메타(`model`)에 반영하도록 보강
+- [x] 회귀 테스트 추가: 503 후 재시도 성공, pro 실패 후 flash 폴백 성공
+- [x] 검증 수행 (`PYTHONPATH=. .venv/bin/ruff check app tests`, `PYTHONPATH=. .venv/bin/pytest -q`)
