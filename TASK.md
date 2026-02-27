@@ -293,3 +293,12 @@
 - [x] 문제 본문 저장 시 `problem_text_raw/final`을 Mathpix 산출(`text/latex`)만 사용하도록 변경
 - [x] 회귀 테스트 추가(`test_ocr_jobs_text_policy.py`): AI pre 텍스트 미저장 + Mathpix 텍스트 우선/공백 처리 검증
 - [x] 검증 수행 (`api ruff`, `api pytest`, `reload 서버 /health 확인`)
+
+### 41. AI 선스캔 미리보기 복구 + problem-ocr 진행상태 반영 — `b339678`
+- [x] `extract_problem_candidates`가 `raw_payload.ai_preprocess.problems`를 우선 인식하도록 확장해 AI 선스캔 문항 분할 결과를 미리보기/분류 경로에서 재사용
+- [x] AI 선스캔 후보 번호 중복/음수 케이스를 정규화해 candidate_no 충돌 없이 순차 처리되도록 보강
+- [x] `problem-ocr` 시작 시 `ocr_jobs` 상태를 `processing`으로 전환하고 진행률/에러 필드를 초기화
+- [x] `problem-ocr` 완료 시 `ocr_jobs` 상태/진행률(`completed`, `100%`) 및 완료 시각을 갱신하고 실패 시 `PROBLEM_OCR_ERROR`로 상태 반영
+- [x] `problem-ocr` 페이지 루프 종료 시 `ocr_pages.status='completed'` 갱신으로 목록 진행 집계/미리보기 동기화 개선
+- [x] 회귀 테스트 추가(`test_ai_classifier_asset_hints.py`): `ai_preprocess` 기반 후보 추출 + candidate_no 중복 정규화 검증
+- [x] 검증 수행 (`.venv/bin/ruff check app tests`, `.venv/bin/pytest -q tests/test_ai_classifier_asset_hints.py tests/test_ocr_jobs_text_policy.py`, `.venv/bin/python -m compileall -q app/services/ai_classifier.py app/routers/ocr_jobs.py`)
