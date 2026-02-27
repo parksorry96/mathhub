@@ -56,6 +56,32 @@ class ProblemAssetExtractor:
             self._doc.close()
             self._doc = None
 
+    def render_clip_png(
+        self,
+        *,
+        page_no: int,
+        bbox: dict,
+        asset_type: str = "other",
+        render_scale: float = 2.0,
+    ) -> tuple[bytes | None, dict | None]:
+        if not self.is_available or page_no <= 0:
+            return None, None
+        page_index = page_no - 1
+        if page_index >= len(self._doc):
+            return None, None
+
+        page = self._doc[page_index]
+        clip_rect, normalized_bbox = _resolve_clip_rect(page=page, bbox=bbox, asset_type=asset_type)
+        if clip_rect is None:
+            return None, None
+
+        matrix = pymupdf.Matrix(render_scale, render_scale)
+        pix = page.get_pixmap(matrix=matrix, clip=clip_rect, alpha=False)
+        body = pix.tobytes("png")
+        if not body:
+            return None, None
+        return body, normalized_bbox
+
     def extract_and_upload(
         self,
         *,
@@ -72,7 +98,6 @@ class ProblemAssetExtractor:
         if page_index >= len(self._doc):
             return []
 
-        page = self._doc[page_index]
         selected_hints = _select_asset_hints(asset_hints)
         if not selected_hints:
             return []
@@ -86,16 +111,14 @@ class ProblemAssetExtractor:
             hint_bbox = hint.get("bbox") if isinstance(hint.get("bbox"), dict) else None
             fallback_bbox = candidate_bbox if isinstance(candidate_bbox, dict) else None
             resolved_bbox = hint_bbox if hint_bbox is not None else fallback_bbox
-            clip_rect, normalized_bbox = _resolve_clip_rect(
-                page=page,
+            if not isinstance(resolved_bbox, dict):
+                continue
+            body, normalized_bbox = self.render_clip_png(
+                page_no=page_no,
                 bbox=resolved_bbox,
                 asset_type=asset_type,
+                render_scale=2.0,
             )
-            if clip_rect is None:
-                continue
-            matrix = pymupdf.Matrix(2.0, 2.0)
-            pix = page.get_pixmap(matrix=matrix, clip=clip_rect, alpha=False)
-            body = pix.tobytes("png")
             if not body:
                 continue
 

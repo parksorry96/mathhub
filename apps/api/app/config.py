@@ -60,6 +60,18 @@ def get_ai_model() -> str:
     return _get_env("AI_MODEL") or get_openai_model()
 
 
+def get_gemini_api_key() -> str | None:
+    return _get_env("GEMINI_API_KEY") or _get_env("GOOGLE_API_KEY")
+
+
+def get_gemini_base_url() -> str:
+    return _get_env("GEMINI_BASE_URL") or "https://generativelanguage.googleapis.com/v1beta"
+
+
+def get_gemini_model() -> str:
+    return _get_env("GEMINI_MODEL") or "gemini-2.5-pro"
+
+
 def get_s3_bucket() -> str | None:
     return _get_env("S3_BUCKET")
 

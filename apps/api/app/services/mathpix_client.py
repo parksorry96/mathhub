@@ -46,6 +46,41 @@ def submit_mathpix_pdf(
         return data
 
 
+def ocr_mathpix_image(
+    *,
+    image_bytes: bytes,
+    app_id: str,
+    app_key: str,
+    base_url: str,
+    image_filename: str = "problem.png",
+    content_type: str = "image/png",
+    options: dict | None = None,
+) -> dict:
+    options_json = options or {"formats": ["text", "latex_styled"]}
+    with httpx.Client(timeout=60.0) as client:
+        response = client.post(
+            f"{base_url.rstrip('/')}/text",
+            headers={
+                "app_id": app_id,
+                "app_key": app_key,
+            },
+            files={
+                "file": (image_filename, image_bytes, content_type),
+                "options_json": (None, json.dumps(options_json), "application/json"),
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
+        if data.get("error") or data.get("error_info"):
+            error_message = data.get("error")
+            if not error_message and isinstance(data.get("error_info"), dict):
+                error_message = data["error_info"].get("message") or data["error_info"].get("id")
+            if not error_message:
+                error_message = json.dumps(data.get("error_info"), ensure_ascii=False)
+            raise RuntimeError(f"Mathpix text OCR error: {error_message}")
+        return data
+
+
 def fetch_mathpix_pdf_status(
     *,
     provider_job_id: str,
@@ -290,6 +325,16 @@ def merge_mathpix_pages(
         existing["raw_payload"] = merged_raw
 
     return [merged_by_page_no[page_no] for page_no in sorted(merged_by_page_no)]
+
+
+def extract_mathpix_text_fields(payload: dict) -> tuple[str | None, str | None]:
+    text = _first_non_empty_str(payload, ("text", "text_display", "markdown", "md", "html"))
+    latex = _first_non_empty_str(payload, ("latex_styled", "latex"))
+    if text is None and isinstance(payload.get("line_data"), list):
+        lines = [_extract_line_text(line) for line in payload["line_data"] if isinstance(line, dict)]
+        merged = "\n".join(line for line in lines if isinstance(line, str) and line).strip()
+        text = merged or None
+    return text, latex
 
 
 def _to_page_no(value: object, *, fallback: int) -> int:

@@ -52,6 +52,8 @@ import {
   listOcrJobQuestions,
   listOcrJobs,
   materializeProblems,
+  preprocessOcrJobWithAi,
+  runProblemOcrPipeline,
   submitMathpixJob,
   syncMathpixJob,
 } from "@/lib/api";
@@ -388,27 +390,27 @@ export default function JobsPage() {
       setRunningAction((prev) => ({ ...prev, [job.id]: action }));
       try {
         if (action === "pipeline") {
-          if (!job.provider_job_id) {
-            const submitResult = await submitMathpixJob(job.id, {});
-            patchJob(job.id, {
-              provider_job_id: submitResult.provider_job_id,
-              status: submitResult.status as ApiJobStatus,
-              progress_pct: submitResult.progress_pct,
-              started_at: submitResult.started_at ?? job.started_at,
-            });
-            setNotice(`${job.original_filename}: Mathpix 제출 완료, OCR 동기화 시작`);
-          }
-          const syncResult = await runSyncUntilCompleted(job);
-          const classifyResult = await runClassifyLoop(job);
-          const materialized = await materializeProblems(job.id, {
+          setNotice(`${job.original_filename}: AI 페이지 스캔 시작`);
+          const preprocessed = await preprocessOcrJobWithAi(job.id, {
+            max_pages: 500,
+            render_scale: 1.6,
+            temperature: 0.1,
+          });
+          setNotice(
+            `${job.original_filename}: AI 스캔 완료 (페이지 ${preprocessed.scanned_pages}, 문항 ${preprocessed.detected_problems}, 정답매칭 ${preprocessed.matched_answers})`,
+          );
+          const ocrResult = await runProblemOcrPipeline(job.id, {
             curriculum_code: "CSAT_2027",
+            source_category: "other",
+            source_type: "workbook",
+            textbook_title: job.original_filename,
             min_confidence: 0,
             default_point_value: 3,
             default_response_type: "short_answer",
             default_answer_key: "PENDING_REVIEW",
           });
           setNotice(
-            `${job.original_filename}: 자동실행 완료 (OCR ${toNumber(syncResult.progress_pct).toFixed(0)}%, AI ${classifyResult.candidates_processed}/${classifyResult.total_candidates}, 적재 +${materialized.inserted_count}/${materialized.updated_count})`,
+            `${job.original_filename}: 자동실행 완료 (문항OCR ${ocrResult.processed_candidates}, 적재 +${ocrResult.inserted_count}/${ocrResult.updated_count}, 스킵 ${ocrResult.skipped_count})`,
           );
         } else if (action === "submit") {
           const submitResult = await submitMathpixJob(job.id, {});
@@ -620,7 +622,7 @@ export default function JobsPage() {
                   const busy = runningAction[job.id];
                   const submitSourceSupported = isMathpixSubmitSourceSupported(job.storage_key);
                   const submitDisabled = Boolean(busy) || !!job.provider_job_id || !submitSourceSupported;
-                  const pipelineDisabled = Boolean(busy) || (!job.provider_job_id && !submitSourceSupported);
+                  const pipelineDisabled = Boolean(busy) || !submitSourceSupported;
                   const aiTotal = job.ai_total_candidates ?? 0;
                   const aiProcessed = job.ai_candidates_processed ?? 0;
                   const aiAccepted = job.ai_candidates_accepted ?? 0;
@@ -635,9 +637,9 @@ export default function JobsPage() {
                       : "Mathpix 제출";
                   const pipelineTooltip = busy
                     ? "실행 중"
-                    : !job.provider_job_id && !submitSourceSupported
+                    : !submitSourceSupported
                       ? "legacy storage_key(upload://)는 자동실행을 시작할 수 없습니다. 새로 업로드 후 시도하세요."
-                      : "전체 자동 실행 (제출→동기화→AI 분류→문제 적재)";
+                      : "전체 자동 실행 (AI 스캔→문항 분할/정답매칭→문제별 OCR→문제 적재)";
                   return (
                     <TableRow key={job.id} sx={{ "&:hover": { backgroundColor: "rgba(255,255,255,0.02)" } }}>
                       <TableCell>

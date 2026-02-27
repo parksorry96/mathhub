@@ -1,0 +1,406 @@
+from __future__ import annotations
+
+import base64
+import json
+import re
+from decimal import Decimal
+
+import httpx
+
+try:
+    import pymupdf  # type: ignore
+except Exception:  # pragma: no cover - runtime fallback for older wheels
+    try:
+        import fitz as pymupdf  # type: ignore
+    except Exception:  # pragma: no cover - optional dependency
+        pymupdf = None  # type: ignore
+
+
+PAGE_TYPES = {
+    "cover",
+    "toc",
+    "concept",
+    "problem",
+    "answer",
+    "explanation",
+    "mixed",
+    "other",
+}
+ALLOWED_SUBJECT_CODES = {"MATH_I", "MATH_II", "PROB_STATS", "CALCULUS", "GEOMETRY"}
+
+
+_GEMINI_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "page_type": {
+            "type": "string",
+            "enum": ["cover", "toc", "concept", "problem", "answer", "explanation", "mixed", "other"],
+        },
+        "page_summary": {"type": "string"},
+        "problems": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "candidate_no": {"type": "integer"},
+                    "question_no": {"type": "integer"},
+                    "statement_text": {"type": "string"},
+                    "subject_code": {"type": "string"},
+                    "problem_type": {"type": "string"},
+                    "answer_key": {"type": "string"},
+                    "has_visual_asset": {"type": "boolean"},
+                    "confidence": {"type": "number"},
+                    "bbox": {
+                        "type": "object",
+                        "properties": {
+                            "x0_ratio": {"type": "number"},
+                            "y0_ratio": {"type": "number"},
+                            "x1_ratio": {"type": "number"},
+                            "y1_ratio": {"type": "number"},
+                        },
+                        "required": ["x0_ratio", "y0_ratio", "x1_ratio", "y1_ratio"],
+                    },
+                },
+                "required": ["statement_text", "bbox"],
+            },
+        },
+        "answer_candidates": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "question_no": {"type": "integer"},
+                    "answer_key": {"type": "string"},
+                    "evidence": {"type": "string"},
+                },
+                "required": ["question_no", "answer_key"],
+            },
+        },
+    },
+}
+
+
+def scan_pdf_document_with_gemini(
+    *,
+    pdf_bytes: bytes,
+    api_key: str,
+    base_url: str,
+    model: str,
+    max_pages: int,
+    render_scale: float = 1.6,
+    temperature: float = 0.1,
+) -> list[dict]:
+    if not pymupdf:
+        raise RuntimeError("PyMuPDF is unavailable in runtime environment.")
+    if max_pages <= 0:
+        return []
+
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        total_pages = min(len(doc), max_pages)
+        pages: list[dict] = []
+        for page_no in range(1, total_pages + 1):
+            page = doc[page_no - 1]
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(render_scale, render_scale), alpha=False)
+            image_bytes = pix.tobytes("png")
+            result = _scan_page_with_gemini(
+                image_bytes=image_bytes,
+                page_no=page_no,
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                temperature=temperature,
+            )
+            pages.append(_normalize_scanned_page(result, page_no=page_no, model=model))
+        return pages
+    finally:
+        doc.close()
+
+
+def attach_answer_keys_to_scanned_pages(scanned_pages: list[dict]) -> int:
+    answer_map: dict[int, str] = {}
+    for page in scanned_pages:
+        answer_candidates = page.get("answer_candidates")
+        if not isinstance(answer_candidates, list):
+            continue
+        for answer_item in answer_candidates:
+            if not isinstance(answer_item, dict):
+                continue
+            question_no = _to_positive_int(answer_item.get("question_no"))
+            answer_key = _normalize_answer_key(answer_item.get("answer_key"))
+            if question_no and answer_key and question_no not in answer_map:
+                answer_map[question_no] = answer_key
+
+    if not answer_map:
+        return 0
+
+    matched = 0
+    for page in scanned_pages:
+        problems = page.get("problems")
+        if not isinstance(problems, list):
+            continue
+        for problem in problems:
+            if not isinstance(problem, dict):
+                continue
+            question_no = _to_positive_int(problem.get("question_no"))
+            if not question_no:
+                continue
+            if problem.get("answer_key"):
+                continue
+            answer_key = answer_map.get(question_no)
+            if not answer_key:
+                continue
+            problem["answer_key"] = answer_key
+            problem["answer_source"] = "answer_page"
+            matched += 1
+    return matched
+
+
+def _scan_page_with_gemini(
+    *,
+    image_bytes: bytes,
+    page_no: int,
+    api_key: str,
+    base_url: str,
+    model: str,
+    temperature: float,
+) -> dict:
+    prompt = (
+        "You analyze one textbook page image for Korean high-school math ingestion.\n"
+        "Return ONLY JSON.\n"
+        "Tasks:\n"
+        "1) classify page_type as cover/toc/concept/problem/answer/explanation/mixed/other.\n"
+        "2) extract problem candidates only when they are real question statements.\n"
+        "3) for each problem, provide normalized bbox ratios x0_ratio,y0_ratio,x1_ratio,y1_ratio in [0,1].\n"
+        "4) if answer keys are visible (answer/explanation pages), extract answer_candidates as {question_no, answer_key}.\n"
+        "5) use subject_code only from MATH_I,MATH_II,PROB_STATS,CALCULUS,GEOMETRY when inferable.\n"
+        f"Current page number: {page_no}"
+    )
+    image_b64 = base64.b64encode(image_bytes).decode("ascii")
+    url = f"{base_url.rstrip('/')}/models/{model}:generateContent"
+    payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {"text": prompt},
+                    {
+                        "inlineData": {
+                            "mimeType": "image/png",
+                            "data": image_b64,
+                        }
+                    },
+                ],
+            }
+        ],
+        "generationConfig": {
+            "temperature": temperature,
+            "responseMimeType": "application/json",
+            "responseSchema": _GEMINI_RESPONSE_SCHEMA,
+        },
+    }
+
+    with httpx.Client(timeout=90.0) as client:
+        response = client.post(
+            url,
+            headers={
+                "x-goog-api-key": api_key,
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+    text = _extract_gemini_text(data)
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except Exception:
+        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if not match:
+            return {}
+        try:
+            return json.loads(match.group(0))
+        except Exception:
+            return {}
+
+
+def _extract_gemini_text(data: dict) -> str:
+    candidates = data.get("candidates")
+    if not isinstance(candidates, list):
+        return ""
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        content = candidate.get("content")
+        if not isinstance(content, dict):
+            continue
+        parts = content.get("parts")
+        if not isinstance(parts, list):
+            continue
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text")
+            if isinstance(text, str) and text.strip():
+                return text.strip()
+    return ""
+
+
+def _normalize_scanned_page(raw: dict, *, page_no: int, model: str) -> dict:
+    page_type = str(raw.get("page_type") or "other").strip().lower()
+    if page_type not in PAGE_TYPES:
+        page_type = "other"
+
+    page_summary = str(raw.get("page_summary") or "").strip()
+    normalized_problems: list[dict] = []
+    raw_problems = raw.get("problems")
+    if isinstance(raw_problems, list):
+        for index, item in enumerate(raw_problems, start=1):
+            normalized = _normalize_problem_item(item, fallback_index=index, model=model)
+            if normalized:
+                normalized_problems.append(normalized)
+
+    normalized_answers: list[dict] = []
+    raw_answers = raw.get("answer_candidates")
+    if isinstance(raw_answers, list):
+        for item in raw_answers:
+            normalized = _normalize_answer_item(item)
+            if normalized:
+                normalized_answers.append(normalized)
+
+    return {
+        "page_no": page_no,
+        "page_type": page_type,
+        "page_summary": page_summary,
+        "problems": normalized_problems,
+        "answer_candidates": normalized_answers,
+    }
+
+
+def _normalize_problem_item(item: object, *, fallback_index: int, model: str) -> dict | None:
+    if not isinstance(item, dict):
+        return None
+    statement_text = str(item.get("statement_text") or item.get("statement") or "").strip()
+    if not statement_text:
+        return None
+
+    bbox = _normalize_bbox(item.get("bbox"))
+    if bbox is None:
+        return None
+
+    candidate_no = _to_positive_int(item.get("candidate_no")) or fallback_index
+    question_no = _to_positive_int(item.get("question_no"))
+    subject_code_raw = item.get("subject_code")
+    subject_code = str(subject_code_raw).strip().upper() if subject_code_raw is not None else None
+    if subject_code not in ALLOWED_SUBJECT_CODES:
+        subject_code = None
+
+    problem_type = str(item.get("problem_type") or "").strip() or None
+    answer_key = _normalize_answer_key(item.get("answer_key"))
+    has_visual_asset = bool(item.get("has_visual_asset"))
+    confidence = _to_confidence(item.get("confidence"))
+
+    return {
+        "candidate_no": candidate_no,
+        "question_no": question_no,
+        "statement_text": statement_text,
+        "split_strategy": "gemini_pdf_scan",
+        "bbox": bbox,
+        "subject_code": subject_code,
+        "problem_type": problem_type,
+        "answer_key": answer_key,
+        "has_visual_asset": has_visual_asset,
+        "confidence": confidence,
+        "validation_status": "needs_review",
+        "provider": "gemini",
+        "model": model,
+    }
+
+
+def _normalize_answer_item(item: object) -> dict | None:
+    if not isinstance(item, dict):
+        return None
+    question_no = _to_positive_int(item.get("question_no"))
+    answer_key = _normalize_answer_key(item.get("answer_key"))
+    if not question_no or not answer_key:
+        return None
+    evidence = str(item.get("evidence") or "").strip() or None
+    return {
+        "question_no": question_no,
+        "answer_key": answer_key,
+        "evidence": evidence,
+    }
+
+
+def _normalize_bbox(value: object) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        x0 = float(value.get("x0_ratio"))
+        y0 = float(value.get("y0_ratio"))
+        x1 = float(value.get("x1_ratio"))
+        y1 = float(value.get("y1_ratio"))
+    except Exception:
+        return None
+
+    x0 = _clamp01(x0)
+    y0 = _clamp01(y0)
+    x1 = _clamp01(x1)
+    y1 = _clamp01(y1)
+    if x1 <= x0 or y1 <= y0:
+        return None
+
+    min_span = 0.01
+    if (x1 - x0) < min_span:
+        x1 = min(1.0, x0 + min_span)
+    if (y1 - y0) < min_span:
+        y1 = min(1.0, y0 + min_span)
+
+    return {
+        "x0_ratio": round(x0, 6),
+        "y0_ratio": round(y0, 6),
+        "x1_ratio": round(x1, 6),
+        "y1_ratio": round(y1, 6),
+    }
+
+
+def _to_confidence(value: object) -> float:
+    try:
+        parsed = Decimal(str(value))
+    except Exception:
+        parsed = Decimal("65")
+    parsed = max(Decimal("0"), min(Decimal("100"), parsed))
+    return float(parsed)
+
+
+def _normalize_answer_key(value: object) -> str | None:
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    if not cleaned:
+        return None
+    cleaned = re.sub(r"\s+", "", cleaned)
+    if len(cleaned) > 40:
+        return cleaned[:40]
+    return cleaned
+
+
+def _to_positive_int(value: object) -> int | None:
+    try:
+        parsed = int(str(value))
+    except Exception:
+        return None
+    if parsed > 0:
+        return parsed
+    return None
+
+
+def _clamp01(value: float) -> float:
+    if value < 0:
+        return 0.0
+    if value > 1:
+        return 1.0
+    return value

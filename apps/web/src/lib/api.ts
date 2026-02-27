@@ -107,6 +107,24 @@ export interface OcrJobAiClassifyStepResponse {
   current_candidate_provider: string | null;
 }
 
+export interface OcrJobAIPreprocessPageSummary {
+  page_no: number;
+  page_type: string;
+  problem_count: number;
+  answer_count: number;
+}
+
+export interface OcrJobAIPreprocessResponse {
+  job_id: string;
+  provider: string;
+  model: string;
+  scanned_pages: number;
+  detected_problems: number;
+  detected_answers: number;
+  matched_answers: number;
+  pages: OcrJobAIPreprocessPageSummary[];
+}
+
 export interface OcrJobMathpixSubmitResponse {
   job_id: string;
   provider_job_id: string;
@@ -132,6 +150,25 @@ export interface OcrJobMaterializeResponse {
   inserted_count: number;
   updated_count: number;
   skipped_count: number;
+  results: Array<{
+    page_no: number;
+    candidate_no: number;
+    status: string;
+    problem_id: string | null;
+    external_problem_key: string;
+    reason: string | null;
+  }>;
+}
+
+export interface OcrJobProblemOcrResponse {
+  job_id: string;
+  provider: string;
+  model: string;
+  processed_candidates: number;
+  inserted_count: number;
+  updated_count: number;
+  skipped_count: number;
+  matched_answers: number;
   results: Array<{
     page_no: number;
     candidate_no: number;
@@ -364,6 +401,20 @@ export function classifyOcrJob(jobId: string, payload?: Record<string, unknown>)
 
 export function classifyOcrJobStep(jobId: string, payload?: Record<string, unknown>) {
   return requestJson<OcrJobAiClassifyStepResponse>(`/ocr/jobs/${jobId}/ai-classify/step`, {
+    method: "POST",
+    body: JSON.stringify(payload ?? {}),
+  });
+}
+
+export function preprocessOcrJobWithAi(jobId: string, payload?: Record<string, unknown>) {
+  return requestJson<OcrJobAIPreprocessResponse>(`/ocr/jobs/${jobId}/ai-preprocess`, {
+    method: "POST",
+    body: JSON.stringify(payload ?? {}),
+  });
+}
+
+export function runProblemOcrPipeline(jobId: string, payload?: Record<string, unknown>) {
+  return requestJson<OcrJobProblemOcrResponse>(`/ocr/jobs/${jobId}/problem-ocr`, {
     method: "POST",
     body: JSON.stringify(payload ?? {}),
   });

@@ -204,6 +204,33 @@ class OCRJobAIClassifyStepResponse(BaseModel):
     current_candidate_provider: str | None = None
 
 
+class OCRJobAIPreprocessRequest(BaseModel):
+    api_key: str | None = None
+    api_base_url: str | None = None
+    model: str | None = None
+    max_pages: int = Field(default=500, ge=1, le=1000)
+    render_scale: Decimal = Field(default=1.6, ge=1, le=3)
+    temperature: Decimal = Field(default=0.1, ge=0, le=1)
+
+
+class OCRJobAIPreprocessPageSummary(BaseModel):
+    page_no: int
+    page_type: str
+    problem_count: int
+    answer_count: int
+
+
+class OCRJobAIPreprocessResponse(BaseModel):
+    job_id: UUID
+    provider: str
+    model: str
+    scanned_pages: int
+    detected_problems: int
+    detected_answers: int
+    matched_answers: int
+    pages: list[OCRJobAIPreprocessPageSummary]
+
+
 class OCRJobMathpixSubmitRequest(BaseModel):
     file_url: str | None = None
     callback_url: str | None = None
@@ -237,6 +264,23 @@ class OCRJobMathpixSyncResponse(BaseModel):
     error_message: str | None
 
 
+class OCRJobProblemOCRRequest(BaseModel):
+    app_id: str | None = None
+    app_key: str | None = None
+    base_url: str | None = None
+    curriculum_code: str = Field(default="CSAT_2027", min_length=1)
+    source_id: UUID | None = None
+    source_category: str = Field(default="other", min_length=1)
+    source_type: str = Field(default="workbook", min_length=1)
+    textbook_title: str | None = None
+    min_confidence: Decimal = Field(default=0, ge=0, le=100)
+    default_point_value: int = Field(default=3, ge=2, le=4)
+    default_response_type: str = Field(default="short_answer", min_length=1)
+    default_answer_key: str = Field(default="PENDING_REVIEW", min_length=1)
+    max_problems: int = Field(default=3000, ge=1, le=20000)
+    save_problem_images: bool = True
+
+
 class OCRJobMaterializeProblemsRequest(BaseModel):
     curriculum_code: str = Field(default="CSAT_2027", min_length=1)
     source_id: UUID | None = None
@@ -253,6 +297,18 @@ class MaterializedProblemResult(BaseModel):
     problem_id: UUID | None
     external_problem_key: str
     reason: str | None
+
+
+class OCRJobProblemOCRResponse(BaseModel):
+    job_id: UUID
+    provider: str
+    model: str
+    processed_candidates: int
+    inserted_count: int
+    updated_count: int
+    skipped_count: int
+    matched_answers: int
+    results: list[MaterializedProblemResult]
 
 
 class OCRJobMaterializeProblemsResponse(BaseModel):

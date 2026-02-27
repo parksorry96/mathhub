@@ -1,10 +1,16 @@
 from app.services.ai_classifier import classify_candidate, collect_problem_asset_hints, extract_problem_candidates
+from app.services.gemini_document_scanner import (
+    attach_answer_keys_to_scanned_pages,
+    scan_pdf_document_with_gemini,
+)
 from app.services.mathpix_client import (
+    extract_mathpix_text_fields,
     extract_mathpix_pages,
     extract_mathpix_pages_from_lines,
     fetch_mathpix_pdf_lines,
     fetch_mathpix_pdf_status,
     map_mathpix_job_status,
+    ocr_mathpix_image,
     resolve_provider_job_id,
     submit_mathpix_pdf,
 )
@@ -26,13 +32,17 @@ __all__ = [
     "classify_candidate",
     "collect_problem_asset_hints",
     "extract_problem_candidates",
+    "scan_pdf_document_with_gemini",
+    "attach_answer_keys_to_scanned_pages",
     "submit_mathpix_pdf",
+    "ocr_mathpix_image",
     "fetch_mathpix_pdf_status",
     "fetch_mathpix_pdf_lines",
     "resolve_provider_job_id",
     "map_mathpix_job_status",
     "extract_mathpix_pages",
     "extract_mathpix_pages_from_lines",
+    "extract_mathpix_text_fields",
     "ProblemAssetExtractor",
     "ExtractedAsset",
     "create_s3_client",

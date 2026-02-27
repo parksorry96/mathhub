@@ -10,6 +10,9 @@ from app.config import (
     get_ai_api_base_url,
     get_ai_api_key,
     get_ai_model,
+    get_gemini_base_url,
+    get_gemini_api_key,
+    get_gemini_model,
     get_mathpix_app_id,
     get_mathpix_app_key,
     get_mathpix_base_url,
@@ -20,6 +23,9 @@ from app.schemas.ocr_jobs import (
     AIPageClassification,
     MaterializedProblemResult,
     OCRDocumentSummary,
+    OCRJobAIPreprocessPageSummary,
+    OCRJobAIPreprocessRequest,
+    OCRJobAIPreprocessResponse,
     OCRJobAIClassifyRequest,
     OCRJobAIClassifyResponse,
     OCRJobAIClassifyStepResponse,
@@ -35,6 +41,8 @@ from app.schemas.ocr_jobs import (
     OCRJobMathpixSubmitResponse,
     OCRJobMathpixSyncRequest,
     OCRJobMathpixSyncResponse,
+    OCRJobProblemOCRRequest,
+    OCRJobProblemOCRResponse,
     OCRJobPagesResponse,
     OCRQuestionAssetPreview,
     OCRJobQuestionsResponse,
@@ -42,24 +50,32 @@ from app.schemas.ocr_jobs import (
     OCRQuestionPreviewItem,
 )
 from app.services.ai_classifier import classify_candidate, collect_problem_asset_hints, extract_problem_candidates
+from app.services.gemini_document_scanner import (
+    attach_answer_keys_to_scanned_pages,
+    scan_pdf_document_with_gemini,
+)
 from app.services.problem_asset_extractor import ProblemAssetExtractor
 from app.services.mathpix_client import (
+    extract_mathpix_text_fields,
     extract_mathpix_pages,
     extract_mathpix_pages_from_lines,
     fetch_mathpix_pdf_lines,
     fetch_mathpix_pdf_status,
     map_mathpix_job_status,
+    ocr_mathpix_image,
     merge_mathpix_pages,
     resolve_provider_job_id,
     submit_mathpix_pdf,
 )
 from app.services.s3_storage import (
+    build_storage_key,
     create_s3_client,
     delete_object,
     ensure_s3_bucket,
     generate_presigned_get_url,
     get_object_bytes,
     parse_storage_key,
+    put_object_bytes,
 )
 
 router = APIRouter(prefix="/ocr/jobs", tags=["ocr-jobs"])
@@ -316,6 +332,24 @@ def _resolve_mathpix_credentials(
     return resolved_app_id, resolved_app_key, resolved_base_url
 
 
+def _resolve_gemini_credentials(
+    *,
+    api_key: str | None,
+    base_url: str | None,
+    model: str | None,
+) -> tuple[str, str, str]:
+    resolved_api_key = api_key or get_gemini_api_key()
+    resolved_base_url = base_url or get_gemini_base_url()
+    resolved_model = model or get_gemini_model()
+
+    if not resolved_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="gemini credentials missing: provide api_key or set GEMINI_API_KEY",
+        )
+    return resolved_api_key, resolved_base_url, resolved_model
+
+
 def _resolve_mathpix_file_url(*, file_url: str | None, storage_key: str) -> str:
     candidate = (file_url or storage_key or "").strip()
     if not candidate:
@@ -361,6 +395,27 @@ def _resolve_mathpix_file_url(*, file_url: str | None, storage_key: str) -> str:
         status_code=status.HTTP_400_BAD_REQUEST,
         detail="file_url must be http(s) URL or storage_key must be s3://bucket/key",
     )
+
+
+def _validate_source_category_type(source_category: str, source_type: str) -> tuple[str, str]:
+    category = source_category.strip().lower()
+    source = source_type.strip().lower()
+    allowed_by_category = {
+        "past_exam": {"csat", "kice_mock", "office_mock"},
+        "linked_textbook": {"ebs_linked"},
+        "other": {"private_mock", "workbook", "school_exam", "teacher_made", "other"},
+    }
+    allowed_types = allowed_by_category.get(category)
+    if not allowed_types or source not in allowed_types:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "invalid source_category/source_type pair. "
+                "allowed: past_exam(csat,kice_mock,office_mock), "
+                "linked_textbook(ebs_linked), other(private_mock,workbook,school_exam,teacher_made,other)"
+            ),
+        )
+    return category, source
 
 
 @router.get("", response_model=OCRJobListResponse)
@@ -865,6 +920,696 @@ def list_ocr_job_questions(
         total=total,
         limit=limit,
         offset=offset,
+    )
+
+
+@router.post("/{job_id}/ai-preprocess", response_model=OCRJobAIPreprocessResponse)
+def preprocess_ocr_job_with_ai(
+    job_id: UUID,
+    payload: OCRJobAIPreprocessRequest,
+) -> OCRJobAIPreprocessResponse:
+    api_key, api_base_url, model = _resolve_gemini_credentials(
+        api_key=payload.api_key,
+        base_url=payload.api_base_url,
+        model=payload.model,
+    )
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    j.id,
+                    d.storage_key AS document_storage_key
+                FROM ocr_jobs j
+                JOIN ocr_documents d ON d.id = j.document_id
+                WHERE j.id = %s
+                """,
+                (str(job_id),),
+            )
+            job = cur.fetchone()
+
+        if not job:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"OCR job not found: {job_id}",
+            )
+
+        document_storage_key = str(job.get("document_storage_key") or "").strip()
+        if not document_storage_key.startswith("s3://"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="ai-preprocess requires document storage_key in s3:// format",
+            )
+
+        try:
+            source_bucket, source_key = parse_storage_key(document_storage_key)
+            s3_client = create_s3_client()
+            source_pdf_bytes = get_object_bytes(
+                client=s3_client,
+                bucket=source_bucket,
+                key=source_key,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to read source PDF for ai-preprocess: {exc}",
+            ) from exc
+
+        try:
+            scanned_pages = scan_pdf_document_with_gemini(
+                pdf_bytes=source_pdf_bytes,
+                api_key=api_key,
+                base_url=api_base_url,
+                model=model,
+                max_pages=payload.max_pages,
+                render_scale=float(payload.render_scale),
+                temperature=float(payload.temperature),
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Gemini preprocess request failed: {exc}",
+            ) from exc
+
+        matched_answers = attach_answer_keys_to_scanned_pages(scanned_pages)
+
+        page_summaries: list[OCRJobAIPreprocessPageSummary] = []
+        detected_problems = 0
+        detected_answers = 0
+
+        with conn.cursor() as cur:
+            for scanned_page in scanned_pages:
+                page_no = int(scanned_page.get("page_no") or 0)
+                if page_no <= 0:
+                    continue
+                problems = scanned_page.get("problems")
+                answers = scanned_page.get("answer_candidates")
+                problem_items = problems if isinstance(problems, list) else []
+                answer_items = answers if isinstance(answers, list) else []
+                detected_problems += len(problem_items)
+                detected_answers += len(answer_items)
+
+                page_type = str(scanned_page.get("page_type") or "other")
+                page_summaries.append(
+                    OCRJobAIPreprocessPageSummary(
+                        page_no=page_no,
+                        page_type=page_type,
+                        problem_count=len(problem_items),
+                        answer_count=len(answer_items),
+                    )
+                )
+
+                extracted_text_lines: list[str] = []
+                for item in problem_items:
+                    if not isinstance(item, dict):
+                        continue
+                    candidate_no = item.get("candidate_no")
+                    statement_text = str(item.get("statement_text") or "").strip()
+                    if not statement_text:
+                        continue
+                    prefix = f"{candidate_no}. " if candidate_no is not None else ""
+                    extracted_text_lines.append(f"{prefix}{statement_text}")
+                page_pre_text = "\n\n".join(extracted_text_lines).strip() or None
+
+                cur.execute(
+                    """
+                    INSERT INTO ocr_pages (
+                        job_id,
+                        page_no,
+                        status,
+                        extracted_text,
+                        raw_payload
+                    )
+                    VALUES (%s, %s, 'processing', %s, %s::jsonb)
+                    ON CONFLICT (job_id, page_no) DO UPDATE
+                    SET
+                        extracted_text = COALESCE(ocr_pages.extracted_text, EXCLUDED.extracted_text),
+                        raw_payload = COALESCE(ocr_pages.raw_payload, '{}'::jsonb) || EXCLUDED.raw_payload,
+                        updated_at = NOW()
+                    """,
+                    (
+                        str(job_id),
+                        page_no,
+                        page_pre_text,
+                        Json({"ai_preprocess": _json_ready(scanned_page)}),
+                    ),
+                )
+
+            preprocess_summary = {
+                "provider": "gemini",
+                "model": model,
+                "scanned_pages": len(page_summaries),
+                "detected_problems": detected_problems,
+                "detected_answers": detected_answers,
+                "matched_answers": matched_answers,
+            }
+            cur.execute(
+                """
+                UPDATE ocr_jobs
+                SET raw_response = COALESCE(raw_response, '{}'::jsonb)
+                    || jsonb_build_object('ai_preprocess', %s::jsonb)
+                WHERE id = %s
+                """,
+                (Json(_json_ready(preprocess_summary)), str(job_id)),
+            )
+        conn.commit()
+
+    return OCRJobAIPreprocessResponse(
+        job_id=job_id,
+        provider="gemini",
+        model=model,
+        scanned_pages=len(page_summaries),
+        detected_problems=detected_problems,
+        detected_answers=detected_answers,
+        matched_answers=matched_answers,
+        pages=page_summaries,
+    )
+
+
+@router.post("/{job_id}/problem-ocr", response_model=OCRJobProblemOCRResponse)
+def run_problem_level_ocr_pipeline(
+    job_id: UUID,
+    payload: OCRJobProblemOCRRequest,
+) -> OCRJobProblemOCRResponse:
+    app_id, app_key, base_url = _resolve_mathpix_credentials(
+        app_id=payload.app_id,
+        app_key=payload.app_key,
+        base_url=payload.base_url,
+    )
+    source_category, source_type = _validate_source_category_type(payload.source_category, payload.source_type)
+    if payload.default_response_type not in {"five_choice", "short_answer"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="default_response_type must be one of five_choice, short_answer",
+        )
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    j.id,
+                    d.storage_key AS document_storage_key,
+                    d.original_filename
+                FROM ocr_jobs j
+                JOIN ocr_documents d ON d.id = j.document_id
+                WHERE j.id = %s
+                """,
+                (str(job_id),),
+            )
+            job = cur.fetchone()
+            if not job:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"OCR job not found: {job_id}",
+                )
+
+            cur.execute(
+                "SELECT id FROM curriculum_versions WHERE code = %s",
+                (payload.curriculum_code,),
+            )
+            curriculum = cur.fetchone()
+            if not curriculum:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"curriculum not found: {payload.curriculum_code}",
+                )
+            curriculum_id = curriculum["id"]
+
+            cur.execute(
+                """
+                SELECT code, id
+                FROM math_subjects
+                WHERE curriculum_version_id = %s
+                """,
+                (str(curriculum_id),),
+            )
+            subject_rows = cur.fetchall()
+            subject_id_by_code = {row["code"]: row["id"] for row in subject_rows}
+
+            source_id: UUID | None = payload.source_id
+            if source_id:
+                cur.execute("SELECT id FROM problem_sources WHERE id = %s", (str(source_id),))
+                source_row = cur.fetchone()
+                if not source_row:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"problem source not found: {source_id}",
+                    )
+            else:
+                source_code = f"OCRBOOK:{job_id}"
+                source_title = (
+                    payload.textbook_title
+                    or str(job.get("original_filename") or "").strip()
+                    or f"OCR Job {job_id}"
+                )
+                cur.execute(
+                    """
+                    INSERT INTO problem_sources (
+                        source_code,
+                        source_category,
+                        source_type,
+                        title,
+                        metadata
+                    )
+                    VALUES (%s, %s, %s, %s, %s::jsonb)
+                    ON CONFLICT (source_code) DO UPDATE
+                    SET
+                        source_category = EXCLUDED.source_category,
+                        source_type = EXCLUDED.source_type,
+                        title = EXCLUDED.title,
+                        metadata = COALESCE(problem_sources.metadata, '{}'::jsonb) || EXCLUDED.metadata
+                    RETURNING id
+                    """,
+                    (
+                        source_code,
+                        source_category,
+                        source_type,
+                        source_title,
+                        Json(
+                            {
+                                "ingest": {
+                                    "source": "ai_problem_ocr",
+                                    "job_id": str(job_id),
+                                }
+                            }
+                        ),
+                    ),
+                )
+                source_row = cur.fetchone()
+                source_id = source_row["id"] if source_row else None
+
+            cur.execute(
+                """
+                SELECT id, page_no, raw_payload
+                FROM ocr_pages
+                WHERE job_id = %s
+                ORDER BY page_no
+                """,
+                (str(job_id),),
+            )
+            pages = cur.fetchall()
+
+        if not pages:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "No OCR pages available. Run /ocr/jobs/{job_id}/ai-preprocess first "
+                    "to generate problem candidates."
+                ),
+            )
+
+        document_storage_key = str(job.get("document_storage_key") or "").strip()
+        if not document_storage_key.startswith("s3://"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="problem-ocr requires document storage_key in s3:// format",
+            )
+
+        try:
+            source_bucket, source_key = parse_storage_key(document_storage_key)
+            s3_client = create_s3_client()
+            source_pdf_bytes = get_object_bytes(
+                client=s3_client,
+                bucket=source_bucket,
+                key=source_key,
+            )
+            try:
+                target_bucket = ensure_s3_bucket()
+            except Exception:
+                target_bucket = source_bucket
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to read source PDF for problem-ocr: {exc}",
+            ) from exc
+
+        extractor = ProblemAssetExtractor(
+            pdf_bytes=source_pdf_bytes,
+            s3_client=s3_client,
+            bucket=target_bucket,
+            job_id=job_id,
+            prefix="ocr-problem-crops",
+        )
+        if not extractor.is_available:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Problem OCR extractor is unavailable (PyMuPDF missing)",
+            )
+
+        processed_candidates = 0
+        inserted_count = 0
+        updated_count = 0
+        skipped_count = 0
+        matched_answers = 0
+        results: list[MaterializedProblemResult] = []
+
+        try:
+            for page in pages:
+                if processed_candidates >= payload.max_problems:
+                    break
+                page_no = int(page["page_no"])
+                raw_payload = page.get("raw_payload")
+                raw_payload = raw_payload if isinstance(raw_payload, dict) else {}
+                ai_preprocess = raw_payload.get("ai_preprocess")
+                if not isinstance(ai_preprocess, dict):
+                    continue
+                problems = ai_preprocess.get("problems")
+                if not isinstance(problems, list):
+                    continue
+
+                for index, candidate in enumerate(problems, start=1):
+                    if processed_candidates >= payload.max_problems:
+                        break
+                    processed_candidates += 1
+
+                    if not isinstance(candidate, dict):
+                        skipped_count += 1
+                        results.append(
+                            MaterializedProblemResult(
+                                page_no=page_no,
+                                candidate_no=index,
+                                status="skipped",
+                                problem_id=None,
+                                external_problem_key=f"OCRAI:{job_id}:P{page_no}:I{index}",
+                                reason="candidate payload is not an object",
+                            )
+                        )
+                        continue
+
+                    confidence = _to_decimal(candidate.get("confidence"))
+                    if confidence < payload.min_confidence:
+                        skipped_count += 1
+                        results.append(
+                            MaterializedProblemResult(
+                                page_no=page_no,
+                                candidate_no=int(candidate.get("candidate_no") or index),
+                                status="skipped",
+                                problem_id=None,
+                                external_problem_key=f"OCRAI:{job_id}:P{page_no}:I{index}",
+                                reason="confidence below threshold",
+                            )
+                        )
+                        continue
+
+                    statement_text = str(candidate.get("statement_text") or "").strip()
+                    if not statement_text:
+                        skipped_count += 1
+                        results.append(
+                            MaterializedProblemResult(
+                                page_no=page_no,
+                                candidate_no=int(candidate.get("candidate_no") or index),
+                                status="skipped",
+                                problem_id=None,
+                                external_problem_key=f"OCRAI:{job_id}:P{page_no}:I{index}",
+                                reason="empty statement_text",
+                            )
+                        )
+                        continue
+
+                    bbox = candidate.get("bbox") if isinstance(candidate.get("bbox"), dict) else None
+                    if not isinstance(bbox, dict):
+                        skipped_count += 1
+                        results.append(
+                            MaterializedProblemResult(
+                                page_no=page_no,
+                                candidate_no=int(candidate.get("candidate_no") or index),
+                                status="skipped",
+                                problem_id=None,
+                                external_problem_key=f"OCRAI:{job_id}:P{page_no}:I{index}",
+                                reason="candidate bbox missing",
+                            )
+                        )
+                        continue
+
+                    external_problem_key = f"OCRAI:{job_id}:P{page_no}:I{index}"
+                    image_bytes, normalized_bbox = extractor.render_clip_png(
+                        page_no=page_no,
+                        bbox=bbox,
+                        asset_type="other",
+                        render_scale=2.0,
+                    )
+                    if not image_bytes:
+                        skipped_count += 1
+                        results.append(
+                            MaterializedProblemResult(
+                                page_no=page_no,
+                                candidate_no=int(candidate.get("candidate_no") or index),
+                                status="skipped",
+                                problem_id=None,
+                                external_problem_key=external_problem_key,
+                                reason="failed to render problem clip",
+                            )
+                        )
+                        continue
+
+                    try:
+                        ocr_raw = ocr_mathpix_image(
+                            image_bytes=image_bytes,
+                            app_id=app_id,
+                            app_key=app_key,
+                            base_url=base_url,
+                            image_filename=f"{external_problem_key}.png",
+                        )
+                    except Exception as exc:
+                        skipped_count += 1
+                        results.append(
+                            MaterializedProblemResult(
+                                page_no=page_no,
+                                candidate_no=int(candidate.get("candidate_no") or index),
+                                status="skipped",
+                                problem_id=None,
+                                external_problem_key=external_problem_key,
+                                reason=f"Mathpix text OCR failed: {exc}",
+                            )
+                        )
+                        continue
+
+                    extracted_text, extracted_latex = extract_mathpix_text_fields(ocr_raw)
+                    final_text = (extracted_text or statement_text).strip()
+
+                    subject_code = str(candidate.get("subject_code") or "MATH_II").strip().upper()
+                    subject_id = subject_id_by_code.get(subject_code) or subject_id_by_code.get("MATH_II")
+                    if not subject_id:
+                        skipped_count += 1
+                        results.append(
+                            MaterializedProblemResult(
+                                page_no=page_no,
+                                candidate_no=int(candidate.get("candidate_no") or index),
+                                status="skipped",
+                                problem_id=None,
+                                external_problem_key=external_problem_key,
+                                reason="subject mapping unavailable for curriculum",
+                            )
+                        )
+                        continue
+
+                    answer_key = str(candidate.get("answer_key") or "").strip()
+                    response_type = payload.default_response_type
+                    if answer_key in {"1", "2", "3", "4", "5"}:
+                        response_type = "five_choice"
+                    if not answer_key:
+                        answer_key = payload.default_answer_key
+                    if response_type == "five_choice" and answer_key not in {"1", "2", "3", "4", "5"}:
+                        response_type = "short_answer"
+                        answer_key = payload.default_answer_key
+                    if response_type == "short_answer" and not answer_key:
+                        answer_key = "PENDING_REVIEW"
+
+                    point_value_raw = candidate.get("point_value")
+                    point_value = point_value_raw if point_value_raw in (2, 3, 4) else payload.default_point_value
+
+                    crop_storage_key: str | None = None
+                    if payload.save_problem_images:
+                        object_key = (
+                            f"ocr-problem-crops/{job_id}/page-{page_no:04d}/"
+                            f"candidate-{index:03d}.png"
+                        )
+                        put_object_bytes(
+                            client=s3_client,
+                            bucket=target_bucket,
+                            key=object_key,
+                            body=image_bytes,
+                            content_type="image/png",
+                        )
+                        crop_storage_key = build_storage_key(target_bucket, object_key)
+
+                    if candidate.get("answer_source") == "answer_page":
+                        matched_answers += 1
+
+                    metadata = {
+                        "needs_review": True,
+                        "ingest": {
+                            "source": "ai_problem_ocr",
+                            "provider": "gemini+mathpix",
+                            "job_id": str(job_id),
+                            "page_no": page_no,
+                            "candidate_no": int(candidate.get("candidate_no") or index),
+                            "confidence": float(confidence),
+                            "subject_code": subject_code,
+                            "problem_type": candidate.get("problem_type"),
+                            "question_no": candidate.get("question_no"),
+                            "answer_source": candidate.get("answer_source"),
+                        },
+                        "ocr": {
+                            "mathpix_text": extracted_text,
+                            "mathpix_latex": extracted_latex,
+                            "raw": _json_ready(ocr_raw),
+                        },
+                        "textbook": {
+                            "title": payload.textbook_title,
+                            "source_category": source_category,
+                            "source_type": source_type,
+                        },
+                    }
+
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            INSERT INTO problems (
+                                curriculum_version_id,
+                                source_id,
+                                ocr_page_id,
+                                external_problem_key,
+                                primary_subject_id,
+                                response_type,
+                                point_value,
+                                answer_key,
+                                source_problem_no,
+                                source_problem_label,
+                                problem_text_raw,
+                                problem_text_latex,
+                                problem_text_final,
+                                metadata
+                            )
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                            ON CONFLICT (external_problem_key) DO UPDATE
+                            SET
+                                source_id = COALESCE(EXCLUDED.source_id, problems.source_id),
+                                ocr_page_id = EXCLUDED.ocr_page_id,
+                                primary_subject_id = EXCLUDED.primary_subject_id,
+                                response_type = EXCLUDED.response_type,
+                                point_value = EXCLUDED.point_value,
+                                answer_key = EXCLUDED.answer_key,
+                                source_problem_no = EXCLUDED.source_problem_no,
+                                source_problem_label = EXCLUDED.source_problem_label,
+                                problem_text_raw = EXCLUDED.problem_text_raw,
+                                problem_text_latex = EXCLUDED.problem_text_latex,
+                                problem_text_final = EXCLUDED.problem_text_final,
+                                metadata = COALESCE(problems.metadata, '{}'::jsonb) || EXCLUDED.metadata,
+                                updated_at = NOW()
+                            RETURNING id, (xmax = 0) AS inserted
+                            """,
+                            (
+                                str(curriculum_id),
+                                str(source_id) if source_id else None,
+                                str(page["id"]),
+                                external_problem_key,
+                                str(subject_id),
+                                response_type,
+                                point_value,
+                                answer_key,
+                                None,
+                                f"P{page_no}-C{int(candidate.get('candidate_no') or index)}",
+                                statement_text,
+                                extracted_latex,
+                                final_text,
+                                Json(_json_ready(metadata)),
+                            ),
+                        )
+                        problem_row = cur.fetchone()
+
+                    problem_id = problem_row["id"]
+                    was_inserted = bool(problem_row["inserted"])
+                    if was_inserted:
+                        inserted_count += 1
+                        item_status = "inserted"
+                    else:
+                        updated_count += 1
+                        item_status = "updated"
+
+                    if crop_storage_key:
+                        asset_metadata = {
+                            "needs_review": True,
+                            "ingest": {
+                                "source": "ai_problem_ocr",
+                                "job_id": str(job_id),
+                                "page_no": page_no,
+                                "candidate_no": int(candidate.get("candidate_no") or index),
+                            },
+                        }
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                """
+                                INSERT INTO problem_assets (
+                                    problem_id,
+                                    asset_type,
+                                    storage_key,
+                                    page_no,
+                                    bbox,
+                                    metadata
+                                )
+                                VALUES (%s, 'image', %s, %s, %s, %s::jsonb)
+                                ON CONFLICT (problem_id, storage_key) DO UPDATE
+                                SET
+                                    page_no = EXCLUDED.page_no,
+                                    bbox = EXCLUDED.bbox,
+                                    metadata = COALESCE(problem_assets.metadata, '{}'::jsonb) || EXCLUDED.metadata
+                                """,
+                                (
+                                    str(problem_id),
+                                    crop_storage_key,
+                                    page_no,
+                                    Json(_json_ready(normalized_bbox)) if isinstance(normalized_bbox, dict) else None,
+                                    Json(_json_ready(asset_metadata)),
+                                ),
+                            )
+
+                    results.append(
+                        MaterializedProblemResult(
+                            page_no=page_no,
+                            candidate_no=int(candidate.get("candidate_no") or index),
+                            status=item_status,
+                            problem_id=problem_id,
+                            external_problem_key=external_problem_key,
+                            reason=None,
+                        )
+                    )
+
+            with conn.cursor() as cur:
+                summary_payload = {
+                    "provider": "gemini+mathpix",
+                    "model": "gemini-preprocess+mathpix-text",
+                    "processed_candidates": processed_candidates,
+                    "inserted_count": inserted_count,
+                    "updated_count": updated_count,
+                    "skipped_count": skipped_count,
+                    "matched_answers": matched_answers,
+                }
+                cur.execute(
+                    """
+                    UPDATE ocr_jobs
+                    SET raw_response = COALESCE(raw_response, '{}'::jsonb)
+                        || jsonb_build_object('ai_problem_ocr', %s::jsonb)
+                    WHERE id = %s
+                    """,
+                    (Json(_json_ready(summary_payload)), str(job_id)),
+                )
+            conn.commit()
+        finally:
+            extractor.close()
+
+    return OCRJobProblemOCRResponse(
+        job_id=job_id,
+        provider="gemini+mathpix",
+        model="gemini-preprocess+mathpix-text",
+        processed_candidates=processed_candidates,
+        inserted_count=inserted_count,
+        updated_count=updated_count,
+        skipped_count=skipped_count,
+        matched_answers=matched_answers,
+        results=results,
     )
 
 
