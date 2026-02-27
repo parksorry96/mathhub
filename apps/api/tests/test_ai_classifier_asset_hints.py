@@ -1,4 +1,47 @@
-from app.services.ai_classifier import collect_problem_asset_hints
+from app.services.ai_classifier import collect_problem_asset_hints, extract_problem_candidates
+
+
+def test_extract_problem_candidates_reads_ai_preprocess_payload():
+    payload = {
+        "ai_preprocess": {
+            "problems": [
+                {
+                    "candidate_no": 4,
+                    "statement_text": "4번 문항 본문",
+                    "bbox": {"x0_ratio": 0.1, "y0_ratio": 0.2, "x1_ratio": 0.6, "y1_ratio": 0.7},
+                },
+                {
+                    "candidate_no": 5,
+                    "statement_text": "5번 문항 본문",
+                },
+            ]
+        }
+    }
+
+    candidates = extract_problem_candidates("", payload)
+
+    assert len(candidates) == 2
+    assert [item["candidate_no"] for item in candidates] == [4, 5]
+    assert all(item["split_strategy"] == "ai_preprocess" for item in candidates)
+    assert candidates[0]["bbox"]["x0_ratio"] == 0.1
+
+
+def test_extract_problem_candidates_dedupes_ai_preprocess_candidate_numbers():
+    payload = {
+        "ai_preprocess": {
+            "problems": [
+                {"candidate_no": 1, "statement_text": "첫 번째"},
+                {"candidate_no": 1, "statement_text": "중복 번호"},
+                {"statement_text": "번호 없음"},
+                {"candidate_no": -3, "statement_text": "음수 번호"},
+                {"candidate_no": 3, "statement_text": "세 번째"},
+            ]
+        }
+    }
+
+    candidates = extract_problem_candidates("", payload)
+
+    assert [item["candidate_no"] for item in candidates] == [1, 2, 3, 4, 5]
 
 
 def test_collect_problem_asset_hints_prefers_payload_bbox_over_statement_hint():

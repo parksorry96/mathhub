@@ -1279,6 +1279,23 @@ def run_problem_level_ocr_pipeline(
         matched_answers = 0
         results: list[MaterializedProblemResult] = []
 
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE ocr_jobs
+                SET
+                    status = 'processing',
+                    progress_pct = 10,
+                    started_at = COALESCE(started_at, NOW()),
+                    finished_at = NULL,
+                    error_code = NULL,
+                    error_message = NULL
+                WHERE id = %s
+                """,
+                (str(job_id),),
+            )
+        conn.commit()
+
         try:
             for page in pages:
                 if processed_candidates >= payload.max_problems:
@@ -1592,6 +1609,18 @@ def run_problem_level_ocr_pipeline(
                         )
                     )
 
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE ocr_pages
+                        SET
+                            status = 'completed',
+                            updated_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (str(page["id"]),),
+                    )
+
             with conn.cursor() as cur:
                 summary_payload = {
                     "provider": "gemini+mathpix",
@@ -1605,13 +1634,40 @@ def run_problem_level_ocr_pipeline(
                 cur.execute(
                     """
                     UPDATE ocr_jobs
-                    SET raw_response = COALESCE(raw_response, '{}'::jsonb)
-                        || jsonb_build_object('ai_problem_ocr', %s::jsonb)
+                    SET
+                        status = 'completed',
+                        progress_pct = 100,
+                        started_at = COALESCE(started_at, NOW()),
+                        finished_at = NOW(),
+                        error_code = NULL,
+                        error_message = NULL,
+                        raw_response = COALESCE(raw_response, '{}'::jsonb)
+                            || jsonb_build_object('ai_problem_ocr', %s::jsonb)
                     WHERE id = %s
                     """,
                     (Json(_json_ready(summary_payload)), str(job_id)),
                 )
             conn.commit()
+        except Exception as exc:
+            try:
+                conn.rollback()
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE ocr_jobs
+                        SET
+                            status = 'failed',
+                            error_code = 'PROBLEM_OCR_ERROR',
+                            error_message = %s,
+                            finished_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (str(exc), str(job_id)),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+            raise
         finally:
             extractor.close()
 

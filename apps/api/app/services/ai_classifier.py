@@ -87,6 +87,9 @@ VISUAL_NODE_TYPES = {
 def extract_problem_candidates(text: str, page_raw_payload: dict | None = None) -> list[dict]:
     fallback_text = text
     if isinstance(page_raw_payload, dict):
+        ai_preprocess_candidates = _extract_problem_candidates_from_ai_preprocess(page_raw_payload)
+        if ai_preprocess_candidates:
+            return ai_preprocess_candidates
         structured = _extract_problem_candidates_from_layout(page_raw_payload)
         if structured:
             return structured
@@ -115,6 +118,49 @@ def extract_problem_candidates(text: str, page_raw_payload: dict | None = None) 
             }
         )
     return candidates
+
+
+def _extract_problem_candidates_from_ai_preprocess(payload: dict) -> list[dict]:
+    source_payload = payload
+    nested = payload.get("ai_preprocess")
+    if isinstance(nested, dict):
+        source_payload = nested
+
+    raw_problems = source_payload.get("problems")
+    if not isinstance(raw_problems, list):
+        return []
+
+    extracted: list[dict] = []
+    used_candidate_no: set[int] = set()
+    for index, item in enumerate(raw_problems, start=1):
+        if not isinstance(item, dict):
+            continue
+
+        statement_text = str(item.get("statement_text") or "").strip()
+        if not statement_text:
+            continue
+
+        candidate_no_raw = item.get("candidate_no")
+        try:
+            candidate_no = int(candidate_no_raw)
+        except Exception:
+            candidate_no = index
+        if candidate_no <= 0:
+            candidate_no = index
+        while candidate_no in used_candidate_no:
+            candidate_no += 1
+        used_candidate_no.add(candidate_no)
+
+        candidate: dict[str, Any] = {
+            "candidate_no": candidate_no,
+            "statement_text": statement_text,
+            "split_strategy": "ai_preprocess",
+        }
+        if isinstance(item.get("bbox"), dict):
+            candidate["bbox"] = item["bbox"]
+        extracted.append(candidate)
+
+    return extracted
 
 
 def _extract_non_visual_page_text(payload: dict) -> str | None:
