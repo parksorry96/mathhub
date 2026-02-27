@@ -3,6 +3,7 @@ import httpx
 from app.services import gemini_document_scanner as scanner
 from app.services.gemini_document_scanner import (
     _build_generation_config,
+    _create_gemini_http_client,
     _normalize_problem_item,
     _scan_page_with_gemini,
     attach_answer_keys_to_scanned_pages,
@@ -183,6 +184,23 @@ def test_build_generation_config_skips_thinking_budget_for_pro():
 
     assert config["maxOutputTokens"] == 256
     assert "thinkingConfig" not in config
+
+
+def test_create_gemini_http_client_falls_back_when_h2_missing(monkeypatch):
+    captured: dict = {}
+
+    def fake_client(**kwargs):
+        captured.update(kwargs)
+        class _DummyClient:
+            pass
+        return _DummyClient()
+
+    monkeypatch.setattr(scanner.importlib.util, "find_spec", lambda _name: None)
+    monkeypatch.setattr(scanner.httpx, "Client", fake_client)
+
+    _create_gemini_http_client()
+
+    assert captured["http2"] is False
 
 
 def _client_factory(responder):

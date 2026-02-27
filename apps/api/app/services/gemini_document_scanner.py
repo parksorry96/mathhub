@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import importlib.util
 import json
 import random
 import re
@@ -453,9 +454,10 @@ def _build_model_candidates(primary_model: str) -> list[str]:
 
 
 def _create_gemini_http_client() -> httpx.Client:
+    enable_http2 = importlib.util.find_spec("h2") is not None
     return httpx.Client(
         timeout=90.0,
-        http2=True,
+        http2=enable_http2,
         limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
     )
 
