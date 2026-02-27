@@ -83,3 +83,33 @@ def test_collect_problem_asset_hints_skips_raw_payload_text_when_bbox_hints_exis
 
     assert any(item.get("source") == "raw_payload_node" for item in hints)
     assert all(item.get("source") != "raw_payload_text" for item in hints)
+
+
+def test_collect_problem_asset_hints_keeps_large_graph_covering_candidate_bbox():
+    payload = {
+        "page_width": 1000,
+        "page_height": 1000,
+        "lines": [
+            {
+                "id": "large-graph",
+                "type": "chart",
+                "subtype": "line",
+                "cnt": [[380, 380], [920, 380], [920, 930], [380, 930]],
+            }
+        ],
+    }
+    candidate_bbox = {"x1": 520, "y1": 520, "x2": 690, "y2": 760}
+
+    hints = collect_problem_asset_hints(
+        "문항을 풀이하시오.",
+        payload,
+        candidate_bbox=candidate_bbox,
+    )
+
+    graph_hints = [
+        item
+        for item in hints
+        if item.get("asset_type") == "graph" and item.get("source") == "raw_payload_node"
+    ]
+    assert graph_hints
+    assert any(isinstance(item.get("bbox"), dict) for item in graph_hints)

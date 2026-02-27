@@ -766,21 +766,42 @@ def _filter_asset_hints_by_candidate_bbox(hints: list[dict], candidate_bbox: dic
     if not candidate_xyxy:
         return hints
 
+    expanded_candidate_xyxy = _expand_bbox(candidate_xyxy, pad_ratio=0.12, min_pad=24.0)
+    candidate_area = _bbox_area(expanded_candidate_xyxy)
+    if candidate_area <= 0:
+        return hints
+
     filtered: list[dict] = []
     for hint in hints:
         hint_bbox = hint.get("bbox")
         hint_xyxy = _to_bbox_xyxy(hint_bbox)
         if not hint_xyxy:
             continue
-        overlap = _bbox_intersection_area(candidate_xyxy, hint_xyxy)
+        overlap = _bbox_intersection_area(expanded_candidate_xyxy, hint_xyxy)
         if overlap <= 0:
             continue
         hint_area = _bbox_area(hint_xyxy)
         if hint_area <= 0:
             continue
-        if overlap / hint_area >= 0.15:
+        overlap_by_hint = overlap / hint_area
+        overlap_by_candidate = overlap / candidate_area
+        if overlap_by_hint >= 0.12 or overlap_by_candidate >= 0.18:
             filtered.append(hint)
     return filtered
+
+
+def _expand_bbox(
+    xyxy: tuple[float, float, float, float],
+    *,
+    pad_ratio: float,
+    min_pad: float,
+) -> tuple[float, float, float, float]:
+    x1, y1, x2, y2 = xyxy
+    width = max(0.0, x2 - x1)
+    height = max(0.0, y2 - y1)
+    pad_x = max(min_pad, width * pad_ratio)
+    pad_y = max(min_pad, height * pad_ratio)
+    return (x1 - pad_x, y1 - pad_y, x2 + pad_x, y2 + pad_y)
 
 
 def _to_bbox_xyxy(bbox: Any) -> tuple[float, float, float, float] | None:

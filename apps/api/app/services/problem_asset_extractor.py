@@ -86,7 +86,11 @@ class ProblemAssetExtractor:
             hint_bbox = hint.get("bbox") if isinstance(hint.get("bbox"), dict) else None
             fallback_bbox = candidate_bbox if isinstance(candidate_bbox, dict) else None
             resolved_bbox = hint_bbox if hint_bbox is not None else fallback_bbox
-            clip_rect, normalized_bbox = _resolve_clip_rect(page=page, bbox=resolved_bbox)
+            clip_rect, normalized_bbox = _resolve_clip_rect(
+                page=page,
+                bbox=resolved_bbox,
+                asset_type=asset_type,
+            )
             if clip_rect is None:
                 continue
             matrix = pymupdf.Matrix(2.0, 2.0)
@@ -129,24 +133,57 @@ def _select_asset_hints(asset_hints: list[dict]) -> list[dict]:
     if not asset_hints:
         return []
 
-    selected: list[dict] = []
-    per_type_count: defaultdict[str, int] = defaultdict(int)
+    normalized_hints: list[dict] = []
     for hint in asset_hints:
         if not isinstance(hint, dict):
             continue
         asset_type = str(hint.get("asset_type") or "other").strip().lower()
         if asset_type not in {"image", "table", "graph", "other"}:
             asset_type = "other"
+        normalized_hints.append({**hint, "asset_type": asset_type})
+
+    if not normalized_hints:
+        return []
+
+    ranked_hints = sorted(normalized_hints, key=_hint_rank_key, reverse=True)
+    selected: list[dict] = []
+    per_type_count: defaultdict[str, int] = defaultdict(int)
+    for hint in ranked_hints:
+        asset_type = str(hint.get("asset_type") or "other").strip().lower()
         if per_type_count[asset_type] >= 2:
             continue
-        selected.append({**hint, "asset_type": asset_type})
+        selected.append(hint)
         per_type_count[asset_type] += 1
         if len(selected) >= 6:
             break
     return selected
 
 
-def _resolve_clip_rect(*, page, bbox: dict | None) -> tuple[object | None, dict | None]:
+def _hint_rank_key(hint: dict) -> tuple[int, int, float]:
+    source = str(hint.get("source") or "").strip().lower()
+    source_priority = {
+        "raw_payload_node": 4,
+        "statement_text_bbox_fallback": 3,
+        "statement_text": 2,
+        "raw_payload_text": 1,
+    }.get(source, 0)
+
+    bbox = hint.get("bbox")
+    xyxy = _to_xyxy(bbox) if isinstance(bbox, dict) else None
+    if not xyxy:
+        return (0, source_priority, 0.0)
+
+    x0, y0, x1, y1 = xyxy
+    area = max(0.0, x1 - x0) * max(0.0, y1 - y0)
+    return (1, source_priority, area)
+
+
+def _resolve_clip_rect(
+    *,
+    page,
+    bbox: dict | None,
+    asset_type: str = "other",
+) -> tuple[object | None, dict | None]:
     if not isinstance(bbox, dict):
         return None, None
 
@@ -184,12 +221,23 @@ def _resolve_clip_rect(*, page, bbox: dict | None) -> tuple[object | None, dict 
             y0 *= scale_y
             y1 *= scale_y
 
-    pad_x = max(6.0, (x1 - x0) * 0.06)
-    pad_y = max(6.0, (y1 - y0) * 0.06)
+    pad_ratio, min_pad, min_crop_w, min_crop_h = _resolve_crop_profile(asset_type)
+    pad_x = max(min_pad, (x1 - x0) * pad_ratio)
+    pad_y = max(min_pad, (y1 - y0) * pad_ratio)
     x0 = max(0.0, x0 - pad_x)
     y0 = max(0.0, y0 - pad_y)
     x1 = min(page_w, x1 + pad_x)
     y1 = min(page_h, y1 + pad_y)
+    x0, y0, x1, y1 = _enforce_min_crop_size(
+        x0=x0,
+        y0=y0,
+        x1=x1,
+        y1=y1,
+        page_w=page_w,
+        page_h=page_h,
+        min_width=min_crop_w,
+        min_height=min_crop_h,
+    )
     if x1 <= x0 or y1 <= y0:
         return None, None
 
@@ -255,6 +303,56 @@ def _resolve_source_dimensions(bbox: dict) -> tuple[float, float] | None:
     if source_w and source_h:
         return source_w, source_h
     return None
+
+
+def _resolve_crop_profile(asset_type: str) -> tuple[float, float, float, float]:
+    normalized = asset_type.strip().lower()
+    if normalized == "graph":
+        return (0.18, 14.0, 120.0, 120.0)
+    if normalized == "table":
+        return (0.1, 10.0, 72.0, 72.0)
+    if normalized == "image":
+        return (0.08, 8.0, 64.0, 64.0)
+    return (0.06, 6.0, 56.0, 56.0)
+
+
+def _enforce_min_crop_size(
+    *,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    page_w: float,
+    page_h: float,
+    min_width: float,
+    min_height: float,
+) -> tuple[float, float, float, float]:
+    width = x1 - x0
+    height = y1 - y0
+
+    if width < min_width:
+        grow = (min_width - width) / 2.0
+        x0 = max(0.0, x0 - grow)
+        x1 = min(page_w, x1 + grow)
+        width = x1 - x0
+        if width < min_width:
+            if x0 <= 0.0:
+                x1 = min(page_w, x0 + min_width)
+            elif x1 >= page_w:
+                x0 = max(0.0, x1 - min_width)
+
+    if height < min_height:
+        grow = (min_height - height) / 2.0
+        y0 = max(0.0, y0 - grow)
+        y1 = min(page_h, y1 + grow)
+        height = y1 - y0
+        if height < min_height:
+            if y0 <= 0.0:
+                y1 = min(page_h, y0 + min_height)
+            elif y1 >= page_h:
+                y0 = max(0.0, y1 - min_height)
+
+    return x0, y0, x1, y1
 
 
 def _to_positive_float(value: object) -> float | None:
