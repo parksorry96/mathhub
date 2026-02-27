@@ -302,3 +302,13 @@
 - [x] `problem-ocr` 페이지 루프 종료 시 `ocr_pages.status='completed'` 갱신으로 목록 진행 집계/미리보기 동기화 개선
 - [x] 회귀 테스트 추가(`test_ai_classifier_asset_hints.py`): `ai_preprocess` 기반 후보 추출 + candidate_no 중복 정규화 검증
 - [x] 검증 수행 (`.venv/bin/ruff check app tests`, `.venv/bin/pytest -q tests/test_ai_classifier_asset_hints.py tests/test_ocr_jobs_text_policy.py`, `.venv/bin/python -m compileall -q app/services/ai_classifier.py app/routers/ocr_jobs.py`)
+
+### 42. 교재 파이프라인 정밀도/복원력 강화(Gemini 최신모델 + OCR 재시도) — `8273a11`
+- [x] 전처리 기본 모델을 `GEMINI_MODEL` 기준으로 상향(`GEMINI_PREPROCESS_MODEL` 미지정 시 `gemini-2.5-pro` 계열 사용)해 정확도 우선 정책으로 전환
+- [x] Gemini 페이지 스캔 스키마/프롬프트에 `visual_asset_types(image/graph/table/other)`를 추가해 문항 내 그래프/표 분류 신호를 구조화
+- [x] 시각자산 힌트 생성 로직에 AI 후보 메타(`visual_asset_types`, `has_visual_asset`) 반영을 추가해 preview/materialize 자산 분류를 보강
+- [x] `ai-preprocess`/`problem-ocr`에서 `ocr_jobs` 상태/진행률/실패코드(`AI_PREPROCESS_ERROR`) 반영을 보강하고 후보 처리량 기준 진행률(40→95%)을 갱신
+- [x] Mathpix 문제 OCR(`/text`)에 transient 재시도(429/5xx, request error)와 backoff를 추가하고 `data` 포맷을 포함해 텍스트 복구 경로 강화
+- [x] 웹 자동실행 전처리 파라미터를 정확도 모드로 상향(`render_scale=1.7`, `max_output_tokens=8192`, `temperature=0`)
+- [x] 회귀 테스트 추가: config fallback(`test_config.py`), Gemini 시각자산 정규화(`test_gemini_document_scanner.py`), AI 자산타입 힌트(`test_ai_classifier_asset_hints.py`), Mathpix OCR 재시도(`test_mathpix_client.py`)
+- [x] 검증 수행 (`api ruff`, `api pytest`, `api compileall`, `web lint`, `web build`, `/health + /ocr/jobs + /problems API smoke check`)
