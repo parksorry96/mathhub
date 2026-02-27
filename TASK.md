@@ -286,3 +286,10 @@
 - [x] Gemini HTTP 클라이언트 생성 시 `h2` 존재 여부를 검사해 HTTP/1.1로 자동 폴백하도록 수정
 - [x] 회귀 테스트 추가: `h2` 미설치 상황에서 `http2=False`로 클라이언트 생성되는지 검증
 - [x] 검증 수행 (`api ruff`, `pytest tests/test_gemini_document_scanner.py`, `reload 서버 /health 확인`)
+
+### 40. AI 텍스트 혼입 제거(Mathpix OCR 단일 소스화) — `584ccbf`
+- [x] `ai-preprocess` 단계에서 Gemini 문장 텍스트를 `ocr_pages.extracted_text`에 저장하지 않도록 정책 함수 적용
+- [x] `problem-ocr` 단계에서 Mathpix OCR 결과가 비면 Gemini `statement_text`로 대체하던 fallback 제거
+- [x] 문제 본문 저장 시 `problem_text_raw/final`을 Mathpix 산출(`text/latex`)만 사용하도록 변경
+- [x] 회귀 테스트 추가(`test_ocr_jobs_text_policy.py`): AI pre 텍스트 미저장 + Mathpix 텍스트 우선/공백 처리 검증
+- [x] 검증 수행 (`api ruff`, `api pytest`, `reload 서버 /health 확인`)
