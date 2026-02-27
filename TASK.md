@@ -260,3 +260,9 @@
 - [x] 정답 매칭 로직 추가(문항번호 기반 answer page → problem candidate 연결)
 - [x] 프론트 자동실행 버튼 흐름을 `AI 스캔 → 문항 OCR 적재`로 전환하고 API 클라이언트 확장
 - [x] 검증 수행 (`PYTHONPATH=. .venv/bin/ruff check app tests`, `PYTHONPATH=. .venv/bin/pytest -q`, `pnpm --filter @mathhub/web lint`, `pnpm --filter @mathhub/web build`)
+
+### 36. 작업목록 버튼 간소화(핵심 액션 + 상세메뉴) — `012e5e7`
+- [x] 작업 행 액션을 `자동실행`, `문항 미리보기`, `상세 작업` 3버튼 구조로 단순화
+- [x] 기존 세부 액션(`제출`, `동기화`, `AI 분류`, `문제 적재`, `삭제`)은 `상세 작업` 오버플로우 메뉴로 이동
+- [x] 삭제 확인창은 상세 메뉴 경유 시에도 유지되도록 동작 보존
+- [x] 검증 수행 (`pnpm --filter @mathhub/web lint`, `pnpm --filter @mathhub/web build`)
