@@ -2,6 +2,7 @@ import httpx
 
 from app.services import gemini_document_scanner as scanner
 from app.services.gemini_document_scanner import (
+    _build_generation_config,
     _normalize_problem_item,
     _scan_page_with_gemini,
     attach_answer_keys_to_scanned_pages,
@@ -157,6 +158,31 @@ def test_scan_page_with_gemini_falls_back_to_flash_after_transient_failures(monk
     assert used_model == "gemini-2.5-flash"
     assert any("gemini-2.5-pro" in item for item in calls)
     assert any("gemini-2.5-flash" in item for item in calls)
+
+
+def test_build_generation_config_applies_speed_defaults_for_flash():
+    config = _build_generation_config(
+        model="gemini-2.5-flash",
+        temperature=0.1,
+        max_output_tokens=999999,
+        thinking_budget=0,
+    )
+
+    assert config["candidateCount"] == 1
+    assert config["maxOutputTokens"] == 8192
+    assert config["thinkingConfig"]["thinkingBudget"] == 0
+
+
+def test_build_generation_config_skips_thinking_budget_for_pro():
+    config = _build_generation_config(
+        model="gemini-2.5-pro",
+        temperature=0.1,
+        max_output_tokens=10,
+        thinking_budget=0,
+    )
+
+    assert config["maxOutputTokens"] == 256
+    assert "thinkingConfig" not in config
 
 
 def _client_factory(responder):

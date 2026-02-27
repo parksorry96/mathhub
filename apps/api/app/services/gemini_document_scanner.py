@@ -5,6 +5,7 @@ import json
 import random
 import re
 import time
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from decimal import Decimal
 
 import httpx
@@ -34,6 +35,9 @@ _MAX_GEMINI_RETRIES_PER_MODEL = 4
 _RETRY_BASE_DELAY_SECONDS = 0.8
 _RETRY_MAX_DELAY_SECONDS = 8.0
 _GEMINI_FALLBACK_MODEL = "gemini-2.5-flash"
+_DEFAULT_MAX_PARALLEL_PAGES = 3
+_DEFAULT_MAX_OUTPUT_TOKENS = 2048
+_DEFAULT_FLASH_THINKING_BUDGET = 0
 
 
 _GEMINI_RESPONSE_SCHEMA = {
@@ -96,6 +100,9 @@ def scan_pdf_document_with_gemini(
     max_pages: int,
     render_scale: float = 1.6,
     temperature: float = 0.1,
+    max_parallel_pages: int = _DEFAULT_MAX_PARALLEL_PAGES,
+    max_output_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
+    thinking_budget: int | None = _DEFAULT_FLASH_THINKING_BUDGET,
 ) -> list[dict]:
     if not pymupdf:
         raise RuntimeError("PyMuPDF is unavailable in runtime environment.")
@@ -105,23 +112,137 @@ def scan_pdf_document_with_gemini(
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     try:
         total_pages = min(len(doc), max_pages)
-        pages: list[dict] = []
-        for page_no in range(1, total_pages + 1):
-            page = doc[page_no - 1]
-            pix = page.get_pixmap(matrix=pymupdf.Matrix(render_scale, render_scale), alpha=False)
-            image_bytes = pix.tobytes("png")
-            result, used_model = _scan_page_with_gemini(
+        if total_pages <= 0:
+            return []
+        parallel = max(1, int(max_parallel_pages))
+        normalized_max_output_tokens = _clamp_int(max_output_tokens, lower=256, upper=8192)
+        if parallel == 1:
+            with _create_gemini_http_client() as client:
+                pages: list[dict] = []
+                for page_no in range(1, total_pages + 1):
+                    image_bytes = _render_pdf_page_to_png(doc=doc, page_no=page_no, render_scale=render_scale)
+                    pages.append(
+                        _scan_rendered_page_with_gemini(
+                            image_bytes=image_bytes,
+                            page_no=page_no,
+                            api_key=api_key,
+                            base_url=base_url,
+                            model=model,
+                            temperature=temperature,
+                            max_output_tokens=normalized_max_output_tokens,
+                            thinking_budget=thinking_budget,
+                            client=client,
+                        )
+                    )
+                return pages
+        return _scan_document_pages_in_parallel(
+            doc=doc,
+            total_pages=total_pages,
+            render_scale=render_scale,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            temperature=temperature,
+            max_parallel_pages=parallel,
+            max_output_tokens=normalized_max_output_tokens,
+            thinking_budget=thinking_budget,
+        )
+    finally:
+        doc.close()
+
+
+def _scan_document_pages_in_parallel(
+    *,
+    doc,
+    total_pages: int,
+    render_scale: float,
+    api_key: str,
+    base_url: str,
+    model: str,
+    temperature: float,
+    max_parallel_pages: int,
+    max_output_tokens: int,
+    thinking_budget: int | None,
+) -> list[dict]:
+    if total_pages <= 0:
+        return []
+
+    max_workers = min(total_pages, max(1, max_parallel_pages))
+    page_results: dict[int, dict] = {}
+    future_to_page_no: dict[Future[dict], int] = {}
+    next_page_no = 1
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        while next_page_no <= total_pages and len(future_to_page_no) < max_workers:
+            image_bytes = _render_pdf_page_to_png(doc=doc, page_no=next_page_no, render_scale=render_scale)
+            future = executor.submit(
+                _scan_rendered_page_with_gemini,
                 image_bytes=image_bytes,
-                page_no=page_no,
+                page_no=next_page_no,
                 api_key=api_key,
                 base_url=base_url,
                 model=model,
                 temperature=temperature,
+                max_output_tokens=max_output_tokens,
+                thinking_budget=thinking_budget,
             )
-            pages.append(_normalize_scanned_page(result, page_no=page_no, model=used_model))
-        return pages
-    finally:
-        doc.close()
+            future_to_page_no[future] = next_page_no
+            next_page_no += 1
+
+        while future_to_page_no:
+            done, _ = wait(set(future_to_page_no.keys()), return_when=FIRST_COMPLETED)
+            for finished in done:
+                page_no = future_to_page_no.pop(finished)
+                page_results[page_no] = finished.result()
+                if next_page_no <= total_pages:
+                    image_bytes = _render_pdf_page_to_png(doc=doc, page_no=next_page_no, render_scale=render_scale)
+                    future = executor.submit(
+                        _scan_rendered_page_with_gemini,
+                        image_bytes=image_bytes,
+                        page_no=next_page_no,
+                        api_key=api_key,
+                        base_url=base_url,
+                        model=model,
+                        temperature=temperature,
+                        max_output_tokens=max_output_tokens,
+                        thinking_budget=thinking_budget,
+                    )
+                    future_to_page_no[future] = next_page_no
+                    next_page_no += 1
+
+    return [page_results[page_no] for page_no in range(1, total_pages + 1)]
+
+
+def _render_pdf_page_to_png(*, doc, page_no: int, render_scale: float) -> bytes:
+    page = doc[page_no - 1]
+    pix = page.get_pixmap(matrix=pymupdf.Matrix(render_scale, render_scale), alpha=False)
+    return pix.tobytes("png")
+
+
+def _scan_rendered_page_with_gemini(
+    *,
+    image_bytes: bytes,
+    page_no: int,
+    api_key: str,
+    base_url: str,
+    model: str,
+    temperature: float,
+    max_output_tokens: int,
+    thinking_budget: int | None,
+    client: httpx.Client | None = None,
+) -> dict:
+    result, used_model = _scan_page_with_gemini(
+        image_bytes=image_bytes,
+        page_no=page_no,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
+        thinking_budget=thinking_budget,
+        client=client,
+    )
+    return _normalize_scanned_page(result, page_no=page_no, model=used_model)
 
 
 def attach_answer_keys_to_scanned_pages(scanned_pages: list[dict]) -> int:
@@ -171,7 +292,24 @@ def _scan_page_with_gemini(
     base_url: str,
     model: str,
     temperature: float,
+    max_output_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS,
+    thinking_budget: int | None = _DEFAULT_FLASH_THINKING_BUDGET,
+    client: httpx.Client | None = None,
 ) -> tuple[dict, str]:
+    if client is None:
+        with _create_gemini_http_client() as managed_client:
+            return _scan_page_with_gemini(
+                image_bytes=image_bytes,
+                page_no=page_no,
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                temperature=temperature,
+                max_output_tokens=max_output_tokens,
+                thinking_budget=thinking_budget,
+                client=managed_client,
+            )
+
     model_candidates = _build_model_candidates(model)
     transient_failure: _GeminiTransientModelFailure | None = None
     attempted_models: list[str] = []
@@ -184,6 +322,9 @@ def _scan_page_with_gemini(
                 base_url=base_url,
                 model=model_candidate,
                 temperature=temperature,
+                max_output_tokens=max_output_tokens,
+                thinking_budget=thinking_budget,
+                client=client,
             )
             return result, model_candidate
         except _GeminiTransientModelFailure as exc:
@@ -208,6 +349,9 @@ def _scan_page_with_gemini_model(
     base_url: str,
     model: str,
     temperature: float,
+    max_output_tokens: int,
+    thinking_budget: int | None,
+    client: httpx.Client,
 ) -> dict:
     prompt = (
         "You analyze one textbook page image for Korean high-school math ingestion.\n"
@@ -238,26 +382,28 @@ def _scan_page_with_gemini_model(
             }
         ],
         "generationConfig": {
-            "temperature": temperature,
-            "responseMimeType": "application/json",
-            "responseSchema": _GEMINI_RESPONSE_SCHEMA,
+            **_build_generation_config(
+                model=model,
+                temperature=temperature,
+                max_output_tokens=max_output_tokens,
+                thinking_budget=thinking_budget,
+            )
         },
     }
 
     last_status: int | None = None
     for attempt in range(1, _MAX_GEMINI_RETRIES_PER_MODEL + 1):
         try:
-            with httpx.Client(timeout=90.0) as client:
-                response = client.post(
-                    url,
-                    headers={
-                        "x-goog-api-key": api_key,
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                )
-                response.raise_for_status()
-                data = response.json()
+            response = client.post(
+                url,
+                headers={
+                    "x-goog-api-key": api_key,
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
             return _parse_gemini_response_payload(data)
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code
@@ -306,6 +452,42 @@ def _build_model_candidates(primary_model: str) -> list[str]:
     return candidates
 
 
+def _create_gemini_http_client() -> httpx.Client:
+    return httpx.Client(
+        timeout=90.0,
+        http2=True,
+        limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+    )
+
+
+def _build_generation_config(
+    *,
+    model: str,
+    temperature: float,
+    max_output_tokens: int,
+    thinking_budget: int | None,
+) -> dict:
+    generation_config: dict = {
+        "temperature": temperature,
+        "responseMimeType": "application/json",
+        "responseSchema": _GEMINI_RESPONSE_SCHEMA,
+        "candidateCount": 1,
+        "maxOutputTokens": _clamp_int(max_output_tokens, lower=256, upper=8192),
+    }
+
+    if thinking_budget is not None and _should_include_thinking_budget(model):
+        generation_config["thinkingConfig"] = {
+            "thinkingBudget": _clamp_int(thinking_budget, lower=0, upper=24576),
+        }
+
+    return generation_config
+
+
+def _should_include_thinking_budget(model: str) -> bool:
+    model_name = model.strip().lower()
+    return "2.5" in model_name and "flash" in model_name
+
+
 def _sleep_before_retry(*, attempt: int, retry_after: str | None) -> None:
     delay = _parse_retry_after(retry_after)
     if delay is None:
@@ -325,6 +507,15 @@ def _parse_retry_after(retry_after: str | None) -> float | None:
     except Exception:
         return None
     return max(0.0, min(parsed, _RETRY_MAX_DELAY_SECONDS))
+
+
+def _clamp_int(value: int, *, lower: int, upper: int) -> int:
+    parsed = int(value)
+    if parsed < lower:
+        return lower
+    if parsed > upper:
+        return upper
+    return parsed
 
 
 class _GeminiTransientModelFailure(RuntimeError):

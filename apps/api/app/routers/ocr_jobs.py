@@ -13,6 +13,7 @@ from app.config import (
     get_gemini_base_url,
     get_gemini_api_key,
     get_gemini_model,
+    get_gemini_preprocess_model,
     get_mathpix_app_id,
     get_mathpix_app_key,
     get_mathpix_base_url,
@@ -337,10 +338,11 @@ def _resolve_gemini_credentials(
     api_key: str | None,
     base_url: str | None,
     model: str | None,
+    default_model: str | None = None,
 ) -> tuple[str, str, str]:
     resolved_api_key = api_key or get_gemini_api_key()
     resolved_base_url = base_url or get_gemini_base_url()
-    resolved_model = model or get_gemini_model()
+    resolved_model = model or default_model or get_gemini_model()
 
     if not resolved_api_key:
         raise HTTPException(
@@ -932,6 +934,7 @@ def preprocess_ocr_job_with_ai(
         api_key=payload.api_key,
         base_url=payload.api_base_url,
         model=payload.model,
+        default_model=get_gemini_preprocess_model(),
     )
 
     with get_db_connection() as conn:
@@ -985,6 +988,11 @@ def preprocess_ocr_job_with_ai(
                 max_pages=payload.max_pages,
                 render_scale=float(payload.render_scale),
                 temperature=float(payload.temperature),
+                max_parallel_pages=int(payload.max_parallel_pages),
+                max_output_tokens=int(payload.max_output_tokens),
+                thinking_budget=(
+                    int(payload.thinking_budget) if payload.thinking_budget is not None else None
+                ),
             )
         except Exception as exc:
             raise HTTPException(

@@ -72,6 +72,10 @@ def get_gemini_model() -> str:
     return _get_env("GEMINI_MODEL") or "gemini-2.5-pro"
 
 
+def get_gemini_preprocess_model() -> str:
+    return _get_env("GEMINI_PREPROCESS_MODEL") or "gemini-2.5-flash"
+
+
 def get_s3_bucket() -> str | None:
     return _get_env("S3_BUCKET")
 

@@ -209,8 +209,11 @@ class OCRJobAIPreprocessRequest(BaseModel):
     api_base_url: str | None = None
     model: str | None = None
     max_pages: int = Field(default=500, ge=1, le=1000)
-    render_scale: Decimal = Field(default=1.6, ge=1, le=3)
+    render_scale: Decimal = Field(default=1.35, ge=1, le=3)
     temperature: Decimal = Field(default=0.1, ge=0, le=1)
+    max_parallel_pages: int = Field(default=3, ge=1, le=8)
+    max_output_tokens: int = Field(default=2048, ge=256, le=8192)
+    thinking_budget: int | None = Field(default=0, ge=0, le=24576)
 
 
 class OCRJobAIPreprocessPageSummary(BaseModel):
