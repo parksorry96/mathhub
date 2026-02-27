@@ -273,3 +273,10 @@
 - [x] 페이지별 실제 사용 모델을 문제 후보 메타(`model`)에 반영하도록 보강
 - [x] 회귀 테스트 추가: 503 후 재시도 성공, pro 실패 후 flash 폴백 성공
 - [x] 검증 수행 (`PYTHONPATH=. .venv/bin/ruff check app tests`, `PYTHONPATH=. .venv/bin/pytest -q`)
+
+### 38. Gemini 전처리 속도 최적화(병렬 + Flash 기본) — `526da96`
+- [x] AI 전처리 기본 모델을 `GEMINI_PREPROCESS_MODEL`(기본 `gemini-2.5-flash`)로 분리해 저지연 모델 기본화
+- [x] 전처리 요청 스키마에 속도 옵션 추가(`max_parallel_pages`, `max_output_tokens`, `thinking_budget`) 및 기본 렌더 스케일을 `1.35`로 조정
+- [x] PDF 페이지 스캔을 병렬 실행(페이지 렌더링 스트리밍 + bounded worker)하도록 서비스 로직 개선
+- [x] Gemini generation config에 `candidateCount=1`, `maxOutputTokens` 제한, Flash용 `thinkingBudget` 적용
+- [x] 회귀 테스트 추가(생성 설정 speed 옵션 검증 2건) 및 전체 검증 수행 (`api ruff`, `api pytest`, `web lint`, `web build`)
