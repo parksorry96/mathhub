@@ -315,6 +315,23 @@ def _build_ai_candidate_output(*, candidate: dict, classified: dict) -> AICandid
     )
 
 
+def _build_ai_preprocess_extracted_text(*, problem_items: list[dict]) -> str | None:
+    # Gemini pre-process is only for page/candidate segmentation and classification.
+    # OCR text persistence is intentionally disabled to keep Mathpix as single text source.
+    del problem_items
+    return None
+
+
+def _resolve_problem_text_from_mathpix(*, extracted_text: str | None, extracted_latex: str | None) -> str | None:
+    text = (extracted_text or "").strip()
+    if text:
+        return text
+    latex = (extracted_latex or "").strip()
+    if latex:
+        return latex
+    return None
+
+
 def _resolve_mathpix_credentials(
     *,
     app_id: str | None,
@@ -1027,18 +1044,7 @@ def preprocess_ocr_job_with_ai(
                         answer_count=len(answer_items),
                     )
                 )
-
-                extracted_text_lines: list[str] = []
-                for item in problem_items:
-                    if not isinstance(item, dict):
-                        continue
-                    candidate_no = item.get("candidate_no")
-                    statement_text = str(item.get("statement_text") or "").strip()
-                    if not statement_text:
-                        continue
-                    prefix = f"{candidate_no}. " if candidate_no is not None else ""
-                    extracted_text_lines.append(f"{prefix}{statement_text}")
-                page_pre_text = "\n\n".join(extracted_text_lines).strip() or None
+                page_pre_text = _build_ai_preprocess_extracted_text(problem_items=problem_items)
 
                 cur.execute(
                     """
@@ -1321,21 +1327,6 @@ def run_problem_level_ocr_pipeline(
                         )
                         continue
 
-                    statement_text = str(candidate.get("statement_text") or "").strip()
-                    if not statement_text:
-                        skipped_count += 1
-                        results.append(
-                            MaterializedProblemResult(
-                                page_no=page_no,
-                                candidate_no=int(candidate.get("candidate_no") or index),
-                                status="skipped",
-                                problem_id=None,
-                                external_problem_key=f"OCRAI:{job_id}:P{page_no}:I{index}",
-                                reason="empty statement_text",
-                            )
-                        )
-                        continue
-
                     bbox = candidate.get("bbox") if isinstance(candidate.get("bbox"), dict) else None
                     if not isinstance(bbox, dict):
                         skipped_count += 1
@@ -1395,7 +1386,23 @@ def run_problem_level_ocr_pipeline(
                         continue
 
                     extracted_text, extracted_latex = extract_mathpix_text_fields(ocr_raw)
-                    final_text = (extracted_text or statement_text).strip()
+                    final_text = _resolve_problem_text_from_mathpix(
+                        extracted_text=extracted_text,
+                        extracted_latex=extracted_latex,
+                    )
+                    if not final_text:
+                        skipped_count += 1
+                        results.append(
+                            MaterializedProblemResult(
+                                page_no=page_no,
+                                candidate_no=int(candidate.get("candidate_no") or index),
+                                status="skipped",
+                                problem_id=None,
+                                external_problem_key=external_problem_key,
+                                reason="empty Mathpix OCR output",
+                            )
+                        )
+                        continue
 
                     subject_code = str(candidate.get("subject_code") or "MATH_II").strip().upper()
                     subject_id = subject_id_by_code.get(subject_code) or subject_id_by_code.get("MATH_II")
@@ -1520,7 +1527,7 @@ def run_problem_level_ocr_pipeline(
                                 answer_key,
                                 None,
                                 f"P{page_no}-C{int(candidate.get('candidate_no') or index)}",
-                                statement_text,
+                                extracted_text or final_text,
                                 extracted_latex,
                                 final_text,
                                 Json(_json_ready(metadata)),
