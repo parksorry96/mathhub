@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type MouseEvent, useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Box,
@@ -15,6 +15,8 @@ import {
   IconButton,
   InputAdornment,
   LinearProgress,
+  Menu,
+  MenuItem,
   Table,
   TableBody,
   TableCell,
@@ -29,12 +31,9 @@ import {
 import { useTheme } from "@mui/material/styles";
 import SearchRoundedIcon from "@mui/icons-material/SearchRounded";
 import RefreshRoundedIcon from "@mui/icons-material/RefreshRounded";
-import CloudUploadRoundedIcon from "@mui/icons-material/CloudUploadRounded";
-import SmartToyRoundedIcon from "@mui/icons-material/SmartToyRounded";
-import PlaylistAddCheckRoundedIcon from "@mui/icons-material/PlaylistAddCheckRounded";
 import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
-import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
 import VisibilityRoundedIcon from "@mui/icons-material/VisibilityRounded";
+import MoreHorizRoundedIcon from "@mui/icons-material/MoreHorizRounded";
 import { MathJaxContext } from "better-react-mathjax";
 import { ProblemStatementView } from "@/components/problem-statement-view";
 import type {
@@ -247,6 +246,8 @@ export default function JobsPage() {
   const [previewSelectedIndex, setPreviewSelectedIndex] = useState(0);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [actionMenuAnchorEl, setActionMenuAnchorEl] = useState<HTMLElement | null>(null);
+  const [actionMenuJobId, setActionMenuJobId] = useState<string | null>(null);
 
   const loadJobs = useCallback(
     async (search: string, status: FilterStatus, options?: { silent?: boolean }) => {
@@ -279,6 +280,14 @@ export default function JobsPage() {
 
   const patchJob = useCallback((jobId: string, patch: Partial<OcrJobListItem>) => {
     setJobs((prev) => prev.map((item) => (item.id === jobId ? { ...item, ...patch } : item)));
+  }, []);
+  const closeActionMenu = useCallback(() => {
+    setActionMenuAnchorEl(null);
+    setActionMenuJobId(null);
+  }, []);
+  const openActionMenu = useCallback((event: MouseEvent<HTMLElement>, job: OcrJobListItem) => {
+    setActionMenuAnchorEl(event.currentTarget);
+    setActionMenuJobId(job.id);
   }, []);
 
   useEffect(() => {
@@ -465,6 +474,30 @@ export default function JobsPage() {
     [loadJobs, patchJob, runClassifyLoop, runSyncUntilCompleted, searchText, statusFilter],
   );
 
+  const actionMenuJob = useMemo(() => jobs.find((item) => item.id === actionMenuJobId) ?? null, [jobs, actionMenuJobId]);
+  const actionMenuBusy = actionMenuJob ? runningAction[actionMenuJob.id] : undefined;
+  const actionMenuSubmitSourceSupported = actionMenuJob ? isMathpixSubmitSourceSupported(actionMenuJob.storage_key) : false;
+  const actionMenuSubmitDisabled =
+    !actionMenuJob || Boolean(actionMenuBusy) || !!actionMenuJob.provider_job_id || !actionMenuSubmitSourceSupported;
+  const actionMenuSyncDisabled = !actionMenuJob || Boolean(actionMenuBusy) || !actionMenuJob.provider_job_id;
+  const actionMenuClassifyDisabled = !actionMenuJob || Boolean(actionMenuBusy);
+  const actionMenuMaterializeDisabled = !actionMenuJob || Boolean(actionMenuBusy);
+  const actionMenuDeleteDisabled = !actionMenuJob || Boolean(actionMenuBusy);
+
+  const runActionFromMenu = useCallback(
+    (action: "submit" | "sync" | "classify" | "materialize" | "delete") => {
+      if (!actionMenuJob) return;
+      const targetJob = actionMenuJob;
+      closeActionMenu();
+      if (action === "delete") {
+        const ok = window.confirm("이 작업을 삭제할까요?\n(참조가 없으면 원본 S3 파일도 함께 삭제 시도됩니다.)");
+        if (!ok) return;
+      }
+      void runAction(targetJob, action);
+    },
+    [actionMenuJob, closeActionMenu, runAction],
+  );
+
   const openPreview = useCallback(async (job: OcrJobListItem) => {
     setPreviewOpen(true);
     setPreviewTitle(job.original_filename);
@@ -621,7 +654,6 @@ export default function JobsPage() {
                   const status = statusConfig[job.status];
                   const busy = runningAction[job.id];
                   const submitSourceSupported = isMathpixSubmitSourceSupported(job.storage_key);
-                  const submitDisabled = Boolean(busy) || !!job.provider_job_id || !submitSourceSupported;
                   const pipelineDisabled = Boolean(busy) || !submitSourceSupported;
                   const aiTotal = job.ai_total_candidates ?? 0;
                   const aiProcessed = job.ai_candidates_processed ?? 0;
@@ -630,11 +662,6 @@ export default function JobsPage() {
                     job.ai_done !== null ||
                     job.ai_total_candidates !== null ||
                     job.ai_candidates_processed !== null;
-                  const submitTooltip = busy
-                    ? "실행 중"
-                    : !submitSourceSupported
-                      ? "이 작업은 legacy storage_key(upload://)라 제출할 수 없습니다. 새로 업로드 후 시도하세요."
-                      : "Mathpix 제출";
                   const pipelineTooltip = busy
                     ? "실행 중"
                     : !submitSourceSupported
@@ -722,70 +749,15 @@ export default function JobsPage() {
                               </IconButton>
                             </span>
                           </Tooltip>
-                          <Tooltip title={submitTooltip}>
-                            <span>
-                              <IconButton
-                                size="small"
-                                sx={{ color: "#919497" }}
-                                disabled={submitDisabled}
-                                onClick={() => void runAction(job, "submit")}
-                              >
-                                <CloudUploadRoundedIcon sx={{ fontSize: 16 }} />
-                              </IconButton>
-                            </span>
-                          </Tooltip>
-                          <Tooltip title={busy ? "실행 중" : "Mathpix 동기화"}>
-                            <span>
-                              <IconButton
-                                size="small"
-                                sx={{ color: "#919497" }}
-                                disabled={Boolean(busy) || !job.provider_job_id}
-                                onClick={() => void runAction(job, "sync")}
-                              >
-                                <RefreshRoundedIcon sx={{ fontSize: 16 }} />
-                              </IconButton>
-                            </span>
-                          </Tooltip>
-                          <Tooltip title={busy ? "실행 중" : "AI 분류"}>
+                          <Tooltip title={busy ? "실행 중" : "상세 작업"}>
                             <span>
                               <IconButton
                                 size="small"
                                 sx={{ color: "#919497" }}
                                 disabled={Boolean(busy)}
-                                onClick={() => void runAction(job, "classify")}
+                                onClick={(event) => openActionMenu(event, job)}
                               >
-                                <SmartToyRoundedIcon sx={{ fontSize: 16 }} />
-                              </IconButton>
-                            </span>
-                          </Tooltip>
-                          <Tooltip title={busy ? "실행 중" : "문제 적재"}>
-                            <span>
-                              <IconButton
-                                size="small"
-                                sx={{ color: "#919497" }}
-                                disabled={Boolean(busy)}
-                                onClick={() => void runAction(job, "materialize")}
-                              >
-                                <PlaylistAddCheckRoundedIcon sx={{ fontSize: 16 }} />
-                              </IconButton>
-                            </span>
-                          </Tooltip>
-                          <Tooltip title={busy ? "실행 중" : "작업 삭제"}>
-                            <span>
-                              <IconButton
-                                size="small"
-                                sx={{ color: "#C45C5C" }}
-                                disabled={Boolean(busy)}
-                                onClick={() => {
-                                  const ok = window.confirm(
-                                    "이 작업을 삭제할까요?\n(참조가 없으면 원본 S3 파일도 함께 삭제 시도됩니다.)",
-                                  );
-                                  if (ok) {
-                                    void runAction(job, "delete");
-                                  }
-                                }}
-                              >
-                                <DeleteOutlineRoundedIcon sx={{ fontSize: 16 }} />
+                                <MoreHorizRoundedIcon sx={{ fontSize: 16 }} />
                               </IconButton>
                             </span>
                           </Tooltip>
@@ -808,6 +780,32 @@ export default function JobsPage() {
           </TableContainer>
         </CardContent>
       </Card>
+
+      <Menu
+        anchorEl={actionMenuAnchorEl}
+        open={Boolean(actionMenuAnchorEl) && Boolean(actionMenuJob)}
+        onClose={closeActionMenu}
+      >
+        <MenuItem disabled={actionMenuSubmitDisabled} onClick={() => runActionFromMenu("submit")}>
+          Mathpix 제출 + 동기화
+        </MenuItem>
+        <MenuItem disabled={actionMenuSyncDisabled} onClick={() => runActionFromMenu("sync")}>
+          Mathpix 동기화
+        </MenuItem>
+        <MenuItem disabled={actionMenuClassifyDisabled} onClick={() => runActionFromMenu("classify")}>
+          AI 분류
+        </MenuItem>
+        <MenuItem disabled={actionMenuMaterializeDisabled} onClick={() => runActionFromMenu("materialize")}>
+          문제 적재
+        </MenuItem>
+        <MenuItem
+          disabled={actionMenuDeleteDisabled}
+          onClick={() => runActionFromMenu("delete")}
+          sx={{ color: "#C45C5C" }}
+        >
+          작업 삭제
+        </MenuItem>
+      </Menu>
 
       <Dialog
         open={previewOpen}
