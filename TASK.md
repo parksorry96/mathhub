@@ -252,3 +252,11 @@
 - [x] 그래프/표/이미지별 crop 패딩 프로파일과 최소 crop 크기를 적용해 시각 자산 잘림을 완화
 - [x] 회귀 테스트 추가: 큰 그래프 bbox 보존(`test_ai_classifier_asset_hints.py`) + 그래프 패딩/힌트 우선순위(`test_problem_asset_extractor.py`)
 - [x] 검증 수행 (`PYTHONPATH=. .venv/bin/pytest -q`, `PYTHONPATH=. .venv/bin/ruff check app tests`)
+
+### 35. AI 선스캔 기반 교재 파이프라인 전환 — `fcbe25f`
+- [x] Gemini 전처리 서비스 추가: PDF 페이지 스캔, 페이지 유형 분류, 문항 bbox/메타 추출, 해설 정답 후보 수집
+- [x] `POST /ocr/jobs/{job_id}/ai-preprocess` 추가로 AI 선스캔 결과를 `ocr_pages.raw_payload.ai_preprocess`에 저장
+- [x] `POST /ocr/jobs/{job_id}/problem-ocr` 추가로 문항 crop별 Mathpix OCR 수행 후 `problems`/`problem_assets` 적재
+- [x] 정답 매칭 로직 추가(문항번호 기반 answer page → problem candidate 연결)
+- [x] 프론트 자동실행 버튼 흐름을 `AI 스캔 → 문항 OCR 적재`로 전환하고 API 클라이언트 확장
+- [x] 검증 수행 (`PYTHONPATH=. .venv/bin/ruff check app tests`, `PYTHONPATH=. .venv/bin/pytest -q`, `pnpm --filter @mathhub/web lint`, `pnpm --filter @mathhub/web build`)
