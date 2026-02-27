@@ -245,3 +245,10 @@
 - [x] preview/materialize 경로 모두 extractor 호출 시 candidate bbox를 전달하도록 라우터 연동
 - [x] 자산 힌트 회귀 테스트 3건 추가 (`apps/api/tests/test_ai_classifier_asset_hints.py`)
 - [x] 검증 수행 (`ruff check`, `pytest -q tests/test_ai_classifier_asset_hints.py`, `python -m compileall app tests`)
+
+### 34. 그래프 crop 잘림 완화 + 자산 선택 안정화 — `7aca739`
+- [x] 후보 bbox 필터를 확장해 큰 그래프가 후보 영역을 덮는 케이스도 힌트로 유지하도록 보완
+- [x] 자산 힌트 선택을 bbox/소스 우선순위 기반으로 재정렬해 작은 축 라벨 bbox보다 큰 그래프 bbox를 우선 선택
+- [x] 그래프/표/이미지별 crop 패딩 프로파일과 최소 crop 크기를 적용해 시각 자산 잘림을 완화
+- [x] 회귀 테스트 추가: 큰 그래프 bbox 보존(`test_ai_classifier_asset_hints.py`) + 그래프 패딩/힌트 우선순위(`test_problem_asset_extractor.py`)
+- [x] 검증 수행 (`PYTHONPATH=. .venv/bin/pytest -q`, `PYTHONPATH=. .venv/bin/ruff check app tests`)
