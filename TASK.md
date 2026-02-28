@@ -312,3 +312,12 @@
 - [x] 웹 자동실행 전처리 파라미터를 정확도 모드로 상향(`render_scale=1.7`, `max_output_tokens=8192`, `temperature=0`)
 - [x] 회귀 테스트 추가: config fallback(`test_config.py`), Gemini 시각자산 정규화(`test_gemini_document_scanner.py`), AI 자산타입 힌트(`test_ai_classifier_asset_hints.py`), Mathpix OCR 재시도(`test_mathpix_client.py`)
 - [x] 검증 수행 (`api ruff`, `api pytest`, `api compileall`, `web lint`, `web build`, `/health + /ocr/jobs + /problems API smoke check`)
+
+### 43. 미리보기 LaTeX 깨짐 + 시각자료 full-page crop 보정 — `a63b4cb`
+- [x] 문제/검수 미리보기 MathJax 설정에 `$...$`/`$$...$$` 구분자와 `processEscapes`를 추가해 LaTeX 표기 호환성 강화
+- [x] `ProblemStatementView`에서 LaTeX 문법 감지 시 공격적인 줄 필터링을 중단해 수식 본문 훼손(깨짐) 방지
+- [x] Gemini 전처리 스키마를 `visual_assets[{asset_type,bbox}]`까지 확장하고 프롬프트에 시각자산 bbox 출력 요구 추가
+- [x] 자산 힌트 생성 시 AI의 `visual_assets` bbox를 우선 반영하도록 보강해 그래프/표 영역을 후보 bbox보다 정밀하게 선택
+- [x] `ProblemAssetExtractor`에서 그래프/표/이미지에 candidate fallback bbox 사용을 차단하고, 페이지의 75% 초과 bbox는 시각자산 crop에서 제외
+- [x] 회귀 테스트 추가: AI visual bbox 힌트 반영, Gemini visual asset 정규화, 시각 bbox 과대영역 차단
+- [x] 검증 수행 (`api ruff`, `api pytest`, `api compileall`, `web lint`, `web build`, `/health`)
