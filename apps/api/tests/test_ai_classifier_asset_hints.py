@@ -137,7 +137,14 @@ def test_collect_problem_asset_hints_uses_candidate_bbox_when_only_text_hint_exi
 
     graph_hints = [item for item in hints if item.get("asset_type") == "graph"]
     assert graph_hints
-    assert any(item.get("bbox") == candidate_bbox for item in graph_hints)
+    assert any(
+        isinstance(item.get("bbox"), dict)
+        and float(item["bbox"]["x1"]) == 500.0
+        and float(item["bbox"]["y1"]) == 580.0
+        and float(item["bbox"]["x2"]) == 760.0
+        and float(item["bbox"]["y2"]) == 800.0
+        for item in graph_hints
+    )
 
 
 def test_collect_problem_asset_hints_skips_raw_payload_text_when_bbox_hints_exist():
@@ -192,3 +199,65 @@ def test_collect_problem_asset_hints_keeps_large_graph_covering_candidate_bbox()
     ]
     assert graph_hints
     assert any(isinstance(item.get("bbox"), dict) for item in graph_hints)
+
+
+def test_collect_problem_asset_hints_filters_payload_graphs_with_ratio_candidate_bbox():
+    payload = {
+        "page_width": 1000,
+        "page_height": 1000,
+        "lines": [
+            {
+                "id": "chart-in-candidate",
+                "type": "chart",
+                "subtype": "line",
+                "cnt": [[560, 560], [760, 560], [760, 760], [560, 760]],
+            },
+            {
+                "id": "chart-outside-candidate",
+                "type": "chart",
+                "subtype": "line",
+                "cnt": [[120, 120], [260, 120], [260, 260], [120, 260]],
+            },
+        ],
+    }
+    ratio_candidate_bbox = {"x0_ratio": 0.5, "y0_ratio": 0.5, "x1_ratio": 0.82, "y1_ratio": 0.82}
+
+    hints = collect_problem_asset_hints(
+        "다음 그래프를 이용하여 값을 구하시오.",
+        payload,
+        candidate_bbox=ratio_candidate_bbox,
+    )
+
+    graph_hints = [item for item in hints if item.get("asset_type") == "graph"]
+    assert graph_hints
+    assert all(float(item["bbox"]["x1"]) >= 500 for item in graph_hints if isinstance(item.get("bbox"), dict))
+    assert all(float(item["bbox"]["x2"]) <= 850 for item in graph_hints if isinstance(item.get("bbox"), dict))
+
+
+def test_collect_problem_asset_hints_normalizes_ai_visual_asset_ratio_bbox():
+    payload = {
+        "page_width": 1000,
+        "page_height": 1000,
+    }
+
+    hints = collect_problem_asset_hints(
+        "문항을 풀이하시오.",
+        payload,
+        candidate_bbox={"x0_ratio": 0.2, "y0_ratio": 0.2, "x1_ratio": 0.9, "y1_ratio": 0.9},
+        candidate_meta={
+            "visual_assets": [
+                {
+                    "asset_type": "graph",
+                    "bbox": {"x0_ratio": 0.55, "y0_ratio": 0.42, "x1_ratio": 0.78, "y1_ratio": 0.76},
+                }
+            ]
+        },
+    )
+
+    ai_bbox_hints = [item for item in hints if item.get("source") == "ai_candidate_visual_asset"]
+    assert ai_bbox_hints
+    graph_bbox = ai_bbox_hints[0]["bbox"]
+    assert graph_bbox["x1"] == 550.0
+    assert graph_bbox["y1"] == 420.0
+    assert graph_bbox["x2"] == 780.0
+    assert graph_bbox["y2"] == 760.0

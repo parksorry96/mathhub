@@ -1341,6 +1341,8 @@ def run_problem_level_ocr_pipeline(
         updated_count = 0
         skipped_count = 0
         matched_answers = 0
+        detected_visual_assets = 0
+        stored_visual_assets = 0
         results: list[MaterializedProblemResult] = []
         total_candidates_target = 0
         for page in pages:
@@ -1391,13 +1393,17 @@ def run_problem_level_ocr_pipeline(
                     if processed_candidates >= payload.max_problems:
                         break
                     processed_candidates += 1
+                    try:
+                        candidate_no = int(candidate.get("candidate_no") or index)
+                    except Exception:
+                        candidate_no = index
 
                     if not isinstance(candidate, dict):
                         skipped_count += 1
                         results.append(
                             MaterializedProblemResult(
                                 page_no=page_no,
-                                candidate_no=index,
+                                candidate_no=candidate_no,
                                 status="skipped",
                                 problem_id=None,
                                 external_problem_key=f"OCRAI:{job_id}:P{page_no}:I{index}",
@@ -1412,7 +1418,7 @@ def run_problem_level_ocr_pipeline(
                         results.append(
                             MaterializedProblemResult(
                                 page_no=page_no,
-                                candidate_no=int(candidate.get("candidate_no") or index),
+                                candidate_no=candidate_no,
                                 status="skipped",
                                 problem_id=None,
                                 external_problem_key=f"OCRAI:{job_id}:P{page_no}:I{index}",
@@ -1427,7 +1433,7 @@ def run_problem_level_ocr_pipeline(
                         results.append(
                             MaterializedProblemResult(
                                 page_no=page_no,
-                                candidate_no=int(candidate.get("candidate_no") or index),
+                                candidate_no=candidate_no,
                                 status="skipped",
                                 problem_id=None,
                                 external_problem_key=f"OCRAI:{job_id}:P{page_no}:I{index}",
@@ -1448,7 +1454,7 @@ def run_problem_level_ocr_pipeline(
                         results.append(
                             MaterializedProblemResult(
                                 page_no=page_no,
-                                candidate_no=int(candidate.get("candidate_no") or index),
+                                candidate_no=candidate_no,
                                 status="skipped",
                                 problem_id=None,
                                 external_problem_key=external_problem_key,
@@ -1470,7 +1476,7 @@ def run_problem_level_ocr_pipeline(
                         results.append(
                             MaterializedProblemResult(
                                 page_no=page_no,
-                                candidate_no=int(candidate.get("candidate_no") or index),
+                                candidate_no=candidate_no,
                                 status="skipped",
                                 problem_id=None,
                                 external_problem_key=external_problem_key,
@@ -1489,7 +1495,7 @@ def run_problem_level_ocr_pipeline(
                         results.append(
                             MaterializedProblemResult(
                                 page_no=page_no,
-                                candidate_no=int(candidate.get("candidate_no") or index),
+                                candidate_no=candidate_no,
                                 status="skipped",
                                 problem_id=None,
                                 external_problem_key=external_problem_key,
@@ -1505,7 +1511,7 @@ def run_problem_level_ocr_pipeline(
                         results.append(
                             MaterializedProblemResult(
                                 page_no=page_no,
-                                candidate_no=int(candidate.get("candidate_no") or index),
+                                candidate_no=candidate_no,
                                 status="skipped",
                                 problem_id=None,
                                 external_problem_key=external_problem_key,
@@ -1547,10 +1553,49 @@ def run_problem_level_ocr_pipeline(
                     if candidate.get("answer_source") == "answer_page":
                         matched_answers += 1
 
+                    statement_text = str(candidate.get("statement_text") or "").strip()
+                    asset_hints = collect_problem_asset_hints(
+                        statement_text if statement_text else final_text,
+                        raw_payload,
+                        candidate_bbox=bbox,
+                        candidate_meta=candidate,
+                    )
+                    detected_visual_assets += len(asset_hints)
+
+                    extracted_assets = []
+                    asset_extractor_error: str | None = None
+                    if asset_hints:
+                        try:
+                            extracted_assets = extractor.extract_and_upload(
+                                page_no=page_no,
+                                candidate_no=candidate_no,
+                                external_problem_key=external_problem_key,
+                                asset_hints=asset_hints,
+                                candidate_bbox=bbox,
+                            )
+                        except Exception as exc:
+                            asset_extractor_error = str(exc)
+                    stored_visual_assets += len(extracted_assets)
+
                     visual_asset_types = _normalize_visual_asset_types(
                         candidate.get("visual_asset_types"),
                         has_visual_asset=bool(candidate.get("has_visual_asset")),
                     )
+                    hint_asset_types = {
+                        str(item.get("asset_type") or "").strip().lower()
+                        for item in asset_hints
+                        if str(item.get("asset_type") or "").strip().lower() in ALLOWED_ASSET_TYPES
+                    }
+                    extracted_asset_types = {
+                        str(item.asset_type).strip().lower()
+                        for item in extracted_assets
+                        if str(item.asset_type).strip().lower() in ALLOWED_ASSET_TYPES
+                    }
+                    for asset_type in sorted(hint_asset_types | extracted_asset_types):
+                        if asset_type not in visual_asset_types:
+                            visual_asset_types.append(asset_type)
+                    visual_asset_types.sort()
+
                     metadata = {
                         "needs_review": True,
                         "ingest": {
@@ -1558,7 +1603,7 @@ def run_problem_level_ocr_pipeline(
                             "provider": "gemini+mathpix",
                             "job_id": str(job_id),
                             "page_no": page_no,
-                            "candidate_no": int(candidate.get("candidate_no") or index),
+                            "candidate_no": candidate_no,
                             "confidence": float(confidence),
                             "subject_code": subject_code,
                             "problem_type": candidate.get("problem_type"),
@@ -1568,6 +1613,10 @@ def run_problem_level_ocr_pipeline(
                         "visual_assets": {
                             "has_visual_asset": bool(candidate.get("has_visual_asset")) or bool(visual_asset_types),
                             "types": visual_asset_types,
+                            "detected_count": len(asset_hints),
+                            "stored_count": len(extracted_assets),
+                            "stored_storage_keys": [item.storage_key for item in extracted_assets],
+                            "extraction_error": asset_extractor_error,
                         },
                         "ocr": {
                             "mathpix_text": extracted_text,
@@ -1628,7 +1677,7 @@ def run_problem_level_ocr_pipeline(
                                 point_value,
                                 answer_key,
                                 None,
-                                f"P{page_no}-C{int(candidate.get('candidate_no') or index)}",
+                                f"P{page_no}-C{candidate_no}",
                                 extracted_text or final_text,
                                 extracted_latex,
                                 final_text,
@@ -1653,7 +1702,7 @@ def run_problem_level_ocr_pipeline(
                                 "source": "ai_problem_ocr",
                                 "job_id": str(job_id),
                                 "page_no": page_no,
-                                "candidate_no": int(candidate.get("candidate_no") or index),
+                                "candidate_no": candidate_no,
                             },
                         }
                         with conn.cursor() as cur:
@@ -1683,10 +1732,116 @@ def run_problem_level_ocr_pipeline(
                                 ),
                             )
 
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            DELETE FROM problem_assets
+                            WHERE problem_id = %s
+                              AND COALESCE(metadata #>> '{ingest,source}', '') IN (
+                                  'ai_problem_ocr_asset_extract',
+                                  'ai_problem_ocr_asset_hint'
+                              )
+                            """,
+                            (str(problem_id),),
+                        )
+                        if extracted_assets:
+                            for asset_index, extracted in enumerate(extracted_assets, start=1):
+                                asset_metadata = {
+                                    "needs_review": True,
+                                    "ingest": {
+                                        "source": "ai_problem_ocr_asset_extract",
+                                        "job_id": str(job_id),
+                                        "page_no": page_no,
+                                        "candidate_no": candidate_no,
+                                        "candidate_key": external_problem_key,
+                                        "asset_index": asset_index,
+                                        **(extracted.metadata or {}),
+                                    },
+                                }
+                                cur.execute(
+                                    """
+                                    INSERT INTO problem_assets (
+                                        problem_id,
+                                        asset_type,
+                                        storage_key,
+                                        page_no,
+                                        bbox,
+                                        metadata
+                                    )
+                                    VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                                    ON CONFLICT (problem_id, storage_key) DO UPDATE
+                                    SET
+                                        asset_type = EXCLUDED.asset_type,
+                                        page_no = EXCLUDED.page_no,
+                                        bbox = EXCLUDED.bbox,
+                                        metadata = COALESCE(problem_assets.metadata, '{}'::jsonb) || EXCLUDED.metadata
+                                    """,
+                                    (
+                                        str(problem_id),
+                                        extracted.asset_type,
+                                        extracted.storage_key,
+                                        extracted.page_no,
+                                        Json(_json_ready(extracted.bbox)) if isinstance(extracted.bbox, dict) else None,
+                                        Json(_json_ready(asset_metadata)),
+                                    ),
+                                )
+                        elif asset_hints:
+                            for asset_index, asset in enumerate(asset_hints[:8], start=1):
+                                asset_type = str(asset.get("asset_type") or "other").strip().lower()
+                                if asset_type not in ALLOWED_ASSET_TYPES:
+                                    asset_type = "other"
+                                storage_key = (
+                                    f"ocr-asset://{job_id}/problem-ocr/"
+                                    f"p{page_no}/c{candidate_no}/{asset_type}/{asset_index}"
+                                )
+                                asset_metadata = {
+                                    "needs_review": True,
+                                    "ingest": {
+                                        "source": "ai_problem_ocr_asset_hint",
+                                        "job_id": str(job_id),
+                                        "page_no": page_no,
+                                        "candidate_no": candidate_no,
+                                        "candidate_key": external_problem_key,
+                                        "asset_index": asset_index,
+                                        "detected_by": asset.get("source"),
+                                        "evidence": asset.get("evidence"),
+                                        "extraction_error": asset_extractor_error,
+                                    },
+                                }
+                                cur.execute(
+                                    """
+                                    INSERT INTO problem_assets (
+                                        problem_id,
+                                        asset_type,
+                                        storage_key,
+                                        page_no,
+                                        bbox,
+                                        metadata
+                                    )
+                                    VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                                    ON CONFLICT (problem_id, storage_key) DO UPDATE
+                                    SET
+                                        asset_type = EXCLUDED.asset_type,
+                                        page_no = EXCLUDED.page_no,
+                                        bbox = EXCLUDED.bbox,
+                                        metadata = COALESCE(problem_assets.metadata, '{}'::jsonb) || EXCLUDED.metadata
+                                    """,
+                                    (
+                                        str(problem_id),
+                                        asset_type,
+                                        storage_key,
+                                        page_no,
+                                        Json(_json_ready(asset.get("bbox")))
+                                        if isinstance(asset.get("bbox"), dict)
+                                        else None,
+                                        Json(_json_ready(asset_metadata)),
+                                    ),
+                                )
+
                     results.append(
                         MaterializedProblemResult(
                             page_no=page_no,
-                            candidate_no=int(candidate.get("candidate_no") or index),
+                            candidate_no=candidate_no,
                             status=item_status,
                             problem_id=problem_id,
                             external_problem_key=external_problem_key,
@@ -1727,6 +1882,8 @@ def run_problem_level_ocr_pipeline(
                     "updated_count": updated_count,
                     "skipped_count": skipped_count,
                     "matched_answers": matched_answers,
+                    "detected_visual_assets": detected_visual_assets,
+                    "stored_visual_assets": stored_visual_assets,
                 }
                 cur.execute(
                     """

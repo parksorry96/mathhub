@@ -247,14 +247,24 @@ def collect_problem_asset_hints(
 ) -> list[dict]:
     hints: list[dict] = []
     normalized = statement_text.strip().lower()
-    resolved_candidate_bbox = candidate_bbox if isinstance(candidate_bbox, dict) else None
     source_dimensions = (
         _resolve_source_dimensions(page_raw_payload) if isinstance(page_raw_payload, dict) else None
     )
+    resolved_candidate_bbox = _normalize_candidate_bbox(
+        candidate_bbox if isinstance(candidate_bbox, dict) else None,
+        source_dimensions=source_dimensions,
+    )
+    if resolved_candidate_bbox is None and isinstance(candidate_meta, dict):
+        resolved_candidate_bbox = _normalize_candidate_bbox(
+            candidate_meta.get("bbox") if isinstance(candidate_meta.get("bbox"), dict) else None,
+            source_dimensions=source_dimensions,
+        )
+
     candidate_visual_types = _extract_candidate_visual_asset_types(candidate_meta)
     candidate_visual_hints = _extract_candidate_visual_asset_hints(
         candidate_meta=candidate_meta,
         candidate_bbox=resolved_candidate_bbox,
+        source_dimensions=source_dimensions,
     )
     if candidate_visual_types:
         hints.extend(
@@ -315,7 +325,7 @@ def collect_problem_asset_hints(
     if (
         isinstance(resolved_candidate_bbox, dict)
         and any(keyword.lower() in normalized for keyword in TEXT_ASSET_KEYWORDS["graph"])
-        and not any(str(item.get("asset_type")) == "graph" for item in hints)
+        and not any(str(item.get("asset_type") or "").strip().lower() == "graph" for item in hints)
     ):
         hints.append(
             {
@@ -356,6 +366,7 @@ def _extract_candidate_visual_asset_hints(
     *,
     candidate_meta: dict | None,
     candidate_bbox: dict | None,
+    source_dimensions: tuple[float, float] | None = None,
 ) -> list[dict]:
     if not isinstance(candidate_meta, dict):
         return []
@@ -370,18 +381,52 @@ def _extract_candidate_visual_asset_hints(
         asset_type = str(item.get("asset_type") or "").strip().lower()
         if asset_type not in {"image", "graph", "table", "other"}:
             asset_type = "other"
-        bbox = item.get("bbox") if isinstance(item.get("bbox"), dict) else candidate_bbox
-        if not isinstance(bbox, dict):
+        raw_bbox = item.get("bbox") if isinstance(item.get("bbox"), dict) else candidate_bbox
+        normalized_bbox = _normalize_candidate_bbox(raw_bbox, source_dimensions=source_dimensions)
+        if not isinstance(normalized_bbox, dict):
             continue
         hints.append(
             {
                 "asset_type": asset_type,
                 "source": "ai_candidate_visual_asset",
-                "bbox": bbox,
+                "bbox": normalized_bbox,
                 "evidence": ["visual_assets"],
             }
         )
     return hints
+
+
+def _normalize_candidate_bbox(
+    bbox: dict | None,
+    *,
+    source_dimensions: tuple[float, float] | None,
+) -> dict | None:
+    if not isinstance(bbox, dict):
+        return None
+
+    normalized_ratio = _to_bbox_ratio_xyxy(bbox)
+    if normalized_ratio and source_dimensions:
+        source_w, source_h = source_dimensions
+        xyxy = (
+            normalized_ratio[0] * source_w,
+            normalized_ratio[1] * source_h,
+            normalized_ratio[2] * source_w,
+            normalized_ratio[3] * source_h,
+        )
+        return _bbox_dict_from_xyxy(xyxy, source_dimensions=source_dimensions)
+    if normalized_ratio:
+        return {
+            "x0_ratio": round(normalized_ratio[0], 6),
+            "y0_ratio": round(normalized_ratio[1], 6),
+            "x1_ratio": round(normalized_ratio[2], 6),
+            "y1_ratio": round(normalized_ratio[3], 6),
+        }
+
+    dimensions = _resolve_bbox_dimensions_from_bbox(bbox) or source_dimensions
+    xyxy = _to_bbox_xyxy(bbox, source_dimensions=dimensions)
+    if not xyxy:
+        return None
+    return _bbox_dict_from_xyxy(xyxy, source_dimensions=dimensions)
 
 
 def _collect_payload_text_hints(payload: dict) -> list[dict]:
@@ -883,21 +928,41 @@ def _candidate_layout_sort_key(candidate: dict, *, layout_mode: str, split_x: fl
 
 
 def _filter_asset_hints_by_candidate_bbox(hints: list[dict], candidate_bbox: dict) -> list[dict]:
-    candidate_xyxy = _to_bbox_xyxy(candidate_bbox)
-    if not candidate_xyxy:
-        return hints
-
-    expanded_candidate_xyxy = _expand_bbox(candidate_xyxy, pad_ratio=0.12, min_pad=24.0)
-    candidate_area = _bbox_area(expanded_candidate_xyxy)
-    if candidate_area <= 0:
+    candidate_dimensions = _resolve_bbox_dimensions_from_bbox(candidate_bbox)
+    base_candidate_xyxy = _to_bbox_xyxy(candidate_bbox, source_dimensions=candidate_dimensions)
+    if not base_candidate_xyxy:
         return hints
 
     filtered: list[dict] = []
     for hint in hints:
         hint_bbox = hint.get("bbox")
-        hint_xyxy = _to_bbox_xyxy(hint_bbox)
+        hint_dimensions = _resolve_bbox_dimensions_from_bbox(hint_bbox) if isinstance(hint_bbox, dict) else None
+        hint_xyxy = _to_bbox_xyxy(
+            hint_bbox,
+            source_dimensions=hint_dimensions or candidate_dimensions,
+        )
         if not hint_xyxy:
             continue
+
+        candidate_xyxy = base_candidate_xyxy
+        if _is_ratio_bbox(candidate_xyxy) and not _is_ratio_bbox(hint_xyxy):
+            dimensions = hint_dimensions or candidate_dimensions
+            if dimensions:
+                candidate_xyxy = _project_ratio_bbox_to_dimensions(candidate_xyxy, dimensions)
+        elif _is_ratio_bbox(hint_xyxy) and not _is_ratio_bbox(candidate_xyxy):
+            dimensions = candidate_dimensions or hint_dimensions
+            if dimensions:
+                hint_xyxy = _project_ratio_bbox_to_dimensions(hint_xyxy, dimensions)
+
+        expanded_candidate_xyxy = _expand_bbox(
+            candidate_xyxy,
+            pad_ratio=0.12,
+            min_pad=0.02 if _is_ratio_bbox(candidate_xyxy) else 24.0,
+        )
+        candidate_area = _bbox_area(expanded_candidate_xyxy)
+        if candidate_area <= 0:
+            continue
+
         overlap = _bbox_intersection_area(expanded_candidate_xyxy, hint_xyxy)
         if overlap <= 0:
             continue
@@ -925,8 +990,18 @@ def _expand_bbox(
     return (x1 - pad_x, y1 - pad_y, x2 + pad_x, y2 + pad_y)
 
 
-def _to_bbox_xyxy(bbox: Any) -> tuple[float, float, float, float] | None:
+def _to_bbox_xyxy(
+    bbox: Any,
+    *,
+    source_dimensions: tuple[float, float] | None = None,
+) -> tuple[float, float, float, float] | None:
     if isinstance(bbox, dict):
+        ratio_xyxy = _to_bbox_ratio_xyxy(bbox)
+        if ratio_xyxy:
+            dimensions = source_dimensions or _resolve_bbox_dimensions_from_bbox(bbox)
+            if dimensions:
+                return _project_ratio_bbox_to_dimensions(ratio_xyxy, dimensions)
+            return ratio_xyxy
         if {"x1", "y1", "x2", "y2"} <= set(bbox):
             try:
                 return float(bbox["x1"]), float(bbox["y1"]), float(bbox["x2"]), float(bbox["y2"])
@@ -971,6 +1046,55 @@ def _to_bbox_xyxy(bbox: Any) -> tuple[float, float, float, float] | None:
             except Exception:
                 return None
     return None
+
+
+def _to_bbox_ratio_xyxy(bbox: dict) -> tuple[float, float, float, float] | None:
+    if {"x0_ratio", "y0_ratio", "x1_ratio", "y1_ratio"} <= set(bbox):
+        try:
+            x0 = float(bbox["x0_ratio"])
+            y0 = float(bbox["y0_ratio"])
+            x1 = float(bbox["x1_ratio"])
+            y1 = float(bbox["y1_ratio"])
+        except Exception:
+            return None
+        if x1 <= x0 or y1 <= y0:
+            return None
+        if min(x0, y0, x1, y1) < 0 or max(x0, y0, x1, y1) > 1:
+            return None
+        return x0, y0, x1, y1
+    return None
+
+
+def _resolve_bbox_dimensions_from_bbox(bbox: Any) -> tuple[float, float] | None:
+    if not isinstance(bbox, dict):
+        return None
+    source_w = _to_positive_float(
+        bbox.get("source_page_width") or bbox.get("page_width") or bbox.get("source_width")
+    )
+    source_h = _to_positive_float(
+        bbox.get("source_page_height") or bbox.get("page_height") or bbox.get("source_height")
+    )
+    if source_w and source_h:
+        return (source_w, source_h)
+    return None
+
+
+def _project_ratio_bbox_to_dimensions(
+    xyxy: tuple[float, float, float, float],
+    dimensions: tuple[float, float],
+) -> tuple[float, float, float, float]:
+    source_w, source_h = dimensions
+    return (
+        xyxy[0] * source_w,
+        xyxy[1] * source_h,
+        xyxy[2] * source_w,
+        xyxy[3] * source_h,
+    )
+
+
+def _is_ratio_bbox(xyxy: tuple[float, float, float, float]) -> bool:
+    x1, y1, x2, y2 = xyxy
+    return min(x1, y1, x2, y2) >= 0 and max(x1, y1, x2, y2) <= 1.0
 
 
 def _bbox_dict_from_xyxy(
