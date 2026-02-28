@@ -1,6 +1,6 @@
 "use client";
 
-import { type MouseEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Box,
@@ -12,11 +12,10 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
-  IconButton,
   InputAdornment,
   LinearProgress,
-  Menu,
   MenuItem,
+  Stack,
   Table,
   TableBody,
   TableCell,
@@ -24,37 +23,27 @@ import {
   TableHead,
   TableRow,
   TextField,
-  Tooltip,
   Typography,
-  useMediaQuery,
 } from "@mui/material";
-import { useTheme } from "@mui/material/styles";
 import SearchRoundedIcon from "@mui/icons-material/SearchRounded";
-import RefreshRoundedIcon from "@mui/icons-material/RefreshRounded";
-import AutoAwesomeRoundedIcon from "@mui/icons-material/AutoAwesomeRounded";
+import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
 import VisibilityRoundedIcon from "@mui/icons-material/VisibilityRounded";
-import MoreHorizRoundedIcon from "@mui/icons-material/MoreHorizRounded";
+import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
+import RefreshRoundedIcon from "@mui/icons-material/RefreshRounded";
 import { MathJaxContext } from "better-react-mathjax";
 import { ProblemStatementView } from "@/components/problem-statement-view";
 import type {
   ApiJobStatus,
-  OcrJobAiClassifyStepResponse,
   OcrJobListItem,
-  OcrJobMathpixSyncResponse,
   OcrPagePreviewItem,
   OcrQuestionPreviewItem,
 } from "@/lib/api";
 import {
-  classifyOcrJobStep,
   deleteOcrJob,
   listOcrJobPages,
   listOcrJobQuestions,
   listOcrJobs,
-  materializeProblems,
-  preprocessOcrJobWithAi,
-  runProblemOcrPipeline,
-  submitMathpixJob,
-  syncMathpixJob,
+  runOcrWorkflow,
 } from "@/lib/api";
 
 type FilterStatus = ApiJobStatus | "all";
@@ -66,14 +55,6 @@ const statusConfig: Record<ApiJobStatus, { label: string; color: string; bg: str
   queued: { label: "대기", color: "#919497", bg: "rgba(145,148,151,0.1)" },
   failed: { label: "실패", color: "#C45C5C", bg: "rgba(196,92,92,0.12)" },
   cancelled: { label: "취소", color: "#C45C5C", bg: "rgba(196,92,92,0.12)" },
-};
-
-const mathJaxConfig = {
-  tex: {
-    inlineMath: [["\\(", "\\)"], ["$", "$"]],
-    displayMath: [["\\[", "\\]"], ["$$", "$$"]],
-    processEscapes: true,
-  },
 };
 
 const QUESTION_SPLIT_PATTERNS: Array<{ strategy: string; pattern: RegExp }> = [
@@ -89,6 +70,14 @@ const VISUAL_HINT_PATTERNS: Array<{ assetType: string; pattern: RegExp }> = [
   { assetType: "image", pattern: /(그림|도형|diagram|figure|image|사진)/i },
 ];
 
+const mathJaxConfig = {
+  tex: {
+    inlineMath: [["\\(", "\\)"], ["$", "$"]],
+    displayMath: [["\\[", "\\]"], ["$$", "$$"]],
+    processEscapes: true,
+  },
+};
+
 function formatDate(dateText: string) {
   return new Date(dateText).toLocaleString("ko-KR", {
     year: "numeric",
@@ -99,28 +88,71 @@ function formatDate(dateText: string) {
   });
 }
 
-function formatDuration(startedAt: string | null, finishedAt: string | null) {
-  if (!startedAt || !finishedAt) return "—";
-  const diffMs = new Date(finishedAt).getTime() - new Date(startedAt).getTime();
-  if (!Number.isFinite(diffMs) || diffMs <= 0) return "—";
-  const totalSec = Math.floor(diffMs / 1000);
-  const min = Math.floor(totalSec / 60);
-  const sec = totalSec % 60;
-  return `${min}분 ${sec}초`;
-}
-
 function toNumber(text: string) {
   const value = Number(text);
   return Number.isFinite(value) ? value : 0;
 }
 
-function isMathpixSubmitSourceSupported(storageKey: string) {
-  const key = storageKey.trim();
-  return key.startsWith("s3://") || key.startsWith("http://") || key.startsWith("https://");
+function splitQuestionCandidates(
+  text: string,
+): Array<{ candidate_no: number; candidate_index: number; statement_text: string; split_strategy: string }> {
+  const cleaned = text.trim();
+  if (!cleaned) return [];
+
+  let bestStrategy = "full_page_fallback";
+  let bestMatches: Array<{ index: number; value: number }> = [];
+  let bestScore = -1;
+
+  for (const entry of QUESTION_SPLIT_PATTERNS) {
+    const matches = Array.from(cleaned.matchAll(entry.pattern))
+      .map((m) => {
+        const idx = m.index;
+        const raw = m[1];
+        const parsed = Number(raw);
+        if (idx === undefined || !Number.isFinite(parsed)) return null;
+        return { index: idx, value: parsed };
+      })
+      .filter((m): m is { index: number; value: number } => m !== null);
+    if (matches.length === 0) continue;
+
+    const score = matches.length;
+    if (score > bestScore) {
+      bestScore = score;
+      bestMatches = matches;
+      bestStrategy = entry.strategy;
+    }
+  }
+
+  if (bestMatches.length === 0) {
+    return [{ candidate_no: 1, candidate_index: 1, statement_text: cleaned, split_strategy: "full_page_fallback" }];
+  }
+
+  const candidates: Array<{ candidate_no: number; candidate_index: number; statement_text: string; split_strategy: string }> = [];
+  for (let i = 0; i < bestMatches.length; i += 1) {
+    const start = bestMatches[i].index;
+    const end = i + 1 < bestMatches.length ? bestMatches[i + 1].index : cleaned.length;
+    const statementText = cleaned.slice(start, end).trim();
+    if (!statementText) continue;
+    candidates.push({
+      candidate_no: bestMatches[i].value,
+      candidate_index: i + 1,
+      statement_text: statementText,
+      split_strategy: bestStrategy,
+    });
+  }
+  return candidates.length > 0
+    ? candidates
+    : [{ candidate_no: 1, candidate_index: 1, statement_text: cleaned, split_strategy: "full_page_fallback" }];
 }
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function detectVisualAssetTypes(statementText: string): string[] {
+  const detected = new Set<string>();
+  for (const hint of VISUAL_HINT_PATTERNS) {
+    if (hint.pattern.test(statementText)) {
+      detected.add(hint.assetType);
+    }
+  }
+  return Array.from(detected).sort();
 }
 
 function toQuestionPreviewItemsFromPages(pages: OcrPagePreviewItem[]): OcrQuestionPreviewItem[] {
@@ -157,82 +189,7 @@ function toQuestionPreviewItemsFromPages(pages: OcrPagePreviewItem[]): OcrQuesti
   return items.sort((a, b) => a.page_no - b.page_no || a.candidate_no - b.candidate_no);
 }
 
-function splitQuestionCandidates(
-  text: string,
-): Array<{ candidate_no: number; candidate_index: number; statement_text: string; split_strategy: string }> {
-  const cleaned = text.trim();
-  if (!cleaned) return [];
-
-  let bestStrategy = "full_page_fallback";
-  let bestMatches: Array<{ index: number; value: number }> = [];
-  let bestScore = -1;
-
-  for (const entry of QUESTION_SPLIT_PATTERNS) {
-    const matches = Array.from(cleaned.matchAll(entry.pattern))
-      .map((m) => {
-        const idx = m.index;
-        const raw = m[1];
-        const parsed = Number(raw);
-        if (idx === undefined || !Number.isFinite(parsed)) return null;
-        return { index: idx, value: parsed };
-      })
-      .filter((m): m is { index: number; value: number } => m !== null);
-    if (matches.length === 0) continue;
-
-    const sequenceBonus = isLikelyQuestionSequence(matches.map((m) => m.value)) ? 2 : 0;
-    const score = matches.length + sequenceBonus;
-    if (score > bestScore) {
-      bestScore = score;
-      bestMatches = matches;
-      bestStrategy = entry.strategy;
-    }
-  }
-
-  if (bestMatches.length === 0) {
-    return [{ candidate_no: 1, candidate_index: 1, statement_text: cleaned, split_strategy: "full_page_fallback" }];
-  }
-
-  const candidates: Array<{ candidate_no: number; candidate_index: number; statement_text: string; split_strategy: string }> = [];
-  for (let i = 0; i < bestMatches.length; i += 1) {
-    const start = bestMatches[i].index;
-    const end = i + 1 < bestMatches.length ? bestMatches[i + 1].index : cleaned.length;
-    const statementText = cleaned.slice(start, end).trim();
-    if (!statementText) continue;
-    candidates.push({
-      candidate_no: bestMatches[i].value,
-      candidate_index: i + 1,
-      statement_text: statementText,
-      split_strategy: bestStrategy,
-    });
-  }
-  return candidates.length > 0
-    ? candidates
-    : [{ candidate_no: 1, candidate_index: 1, statement_text: cleaned, split_strategy: "full_page_fallback" }];
-}
-
-function isLikelyQuestionSequence(numbers: number[]) {
-  if (numbers.length <= 1) return false;
-  let increasing = 0;
-  for (let i = 1; i < numbers.length; i += 1) {
-    const diff = numbers[i] - numbers[i - 1];
-    if (diff > 0 && diff <= 3) increasing += 1;
-  }
-  return increasing >= Math.max(1, numbers.length - 2);
-}
-
-function detectVisualAssetTypes(statementText: string): string[] {
-  const detected = new Set<string>();
-  for (const hint of VISUAL_HINT_PATTERNS) {
-    if (hint.pattern.test(statementText)) {
-      detected.add(hint.assetType);
-    }
-  }
-  return Array.from(detected).sort();
-}
-
 export default function JobsPage() {
-  const theme = useTheme();
-  const isMobilePreview = useMediaQuery(theme.breakpoints.down("md"));
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -241,14 +198,13 @@ export default function JobsPage() {
   const [searchText, setSearchText] = useState("");
   const [statusFilter, setStatusFilter] = useState<FilterStatus>("all");
   const [runningAction, setRunningAction] = useState<Record<string, string>>({});
+
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewTitle, setPreviewTitle] = useState("");
   const [previewQuestions, setPreviewQuestions] = useState<OcrQuestionPreviewItem[]>([]);
   const [previewSelectedIndex, setPreviewSelectedIndex] = useState(0);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
-  const [actionMenuAnchorEl, setActionMenuAnchorEl] = useState<HTMLElement | null>(null);
-  const [actionMenuJobId, setActionMenuJobId] = useState<string | null>(null);
 
   const loadJobs = useCallback(
     async (search: string, status: FilterStatus, options?: { silent?: boolean }) => {
@@ -258,18 +214,16 @@ export default function JobsPage() {
         setError(null);
       }
       try {
-        const res = await listOcrJobs({
-          limit: 100,
+        const response = await listOcrJobs({
+          limit: 200,
           offset: 0,
-          q: search || undefined,
+          q: search.trim() || undefined,
           status: status === "all" ? undefined : status,
         });
-        setJobs(res.items);
-        setTotal(res.total);
+        setJobs(response.items);
+        setTotal(response.total);
       } catch (err) {
-        if (!silent) {
-          setError(err instanceof Error ? err.message : "작업 목록을 불러오지 못했습니다.");
-        }
+        setError(err instanceof Error ? err.message : "작업 목록을 불러오지 못했습니다.");
       } finally {
         if (!silent) {
           setLoading(false);
@@ -279,291 +233,142 @@ export default function JobsPage() {
     [],
   );
 
-  const patchJob = useCallback((jobId: string, patch: Partial<OcrJobListItem>) => {
-    setJobs((prev) => prev.map((item) => (item.id === jobId ? { ...item, ...patch } : item)));
-  }, []);
-  const closeActionMenu = useCallback(() => {
-    setActionMenuAnchorEl(null);
-    setActionMenuJobId(null);
-  }, []);
-  const openActionMenu = useCallback((event: MouseEvent<HTMLElement>, job: OcrJobListItem) => {
-    setActionMenuAnchorEl(event.currentTarget);
-    setActionMenuJobId(job.id);
-  }, []);
+  useEffect(() => {
+    void loadJobs(searchText, statusFilter);
+  }, [loadJobs, searchText, statusFilter]);
+
+  const hasRunningJobs = useMemo(
+    () => jobs.some((job) => ["queued", "uploading", "processing"].includes(job.status)) || Object.keys(runningAction).length > 0,
+    [jobs, runningAction],
+  );
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      void loadJobs(searchText.trim(), statusFilter);
-    }, 250);
-    return () => clearTimeout(timer);
-  }, [searchText, statusFilter, loadJobs]);
-
-  const hasPendingServerUpdates = useMemo(() => {
-    if (Object.keys(runningAction).length > 0) {
-      return true;
-    }
-    return jobs.some((item) => item.status === "queued" || item.status === "uploading" || item.status === "processing");
-  }, [jobs, runningAction]);
-
-  useEffect(() => {
-    if (!hasPendingServerUpdates) {
-      return;
-    }
+    if (!hasRunningJobs) return;
     const timer = setInterval(() => {
-      void loadJobs(searchText.trim(), statusFilter, { silent: true });
+      void loadJobs(searchText, statusFilter, { silent: true });
     }, 2500);
     return () => clearInterval(timer);
-  }, [hasPendingServerUpdates, loadJobs, searchText, statusFilter]);
+  }, [hasRunningJobs, loadJobs, searchText, statusFilter]);
 
-  const runClassifyLoop = useCallback(async (job: OcrJobListItem): Promise<OcrJobAiClassifyStepResponse> => {
-    let latest: OcrJobAiClassifyStepResponse | null = null;
-    let attempts = 0;
-    const maxAttempts = 3000;
-    while (attempts < maxAttempts) {
-      const step = await classifyOcrJobStep(job.id, {
-        max_pages: 50,
-        min_confidence: 0,
-        max_candidates_per_call: 8,
-      });
-      latest = step;
-      patchJob(job.id, {
-        ai_done: step.done,
-        ai_total_candidates: step.total_candidates,
-        ai_candidates_processed: step.candidates_processed,
-        ai_candidates_accepted: step.candidates_accepted,
-        ai_provider: step.provider,
-        ai_model: step.model,
-      });
-      if (!step.done) {
-        const at =
-          step.current_page_no && step.current_candidate_no
-            ? ` (P${step.current_page_no}-C${step.current_candidate_no})`
-            : "";
-        setNotice(`${job.original_filename}: AI 분류 진행중 ${step.candidates_processed}/${step.total_candidates}${at}`);
+  const handleRefresh = useCallback(async () => {
+    await loadJobs(searchText, statusFilter);
+  }, [loadJobs, searchText, statusFilter]);
+
+  const setRowAction = useCallback((jobId: string, action: string | null) => {
+    setRunningAction((prev) => {
+      if (!action) {
+        const next = { ...prev };
+        delete next[jobId];
+        return next;
       }
-      if (step.done) break;
-      attempts += 1;
-    }
-    if (!latest) {
-      throw new Error("AI 분류 응답을 받지 못했습니다.");
-    }
-    if (!latest.done) {
-      throw new Error("AI 분류가 시간 내 완료되지 않았습니다. 다시 시도해주세요.");
-    }
-    return latest;
-  }, [patchJob]);
-
-  const runSyncUntilCompleted = useCallback(async (job: OcrJobListItem): Promise<OcrJobMathpixSyncResponse> => {
-    const terminalStatuses: ApiJobStatus[] = ["completed", "failed", "cancelled"];
-    const maxAttempts = 180;
-    let attempts = 0;
-    let latest: OcrJobMathpixSyncResponse | null = null;
-
-    while (attempts < maxAttempts) {
-      const step = await syncMathpixJob(job.id, {});
-      latest = step;
-      patchJob(job.id, {
-        status: step.status,
-        progress_pct: step.progress_pct,
-        error_message: step.error_message,
-      });
-      setNotice(`${job.original_filename}: OCR 동기화 ${toNumber(step.progress_pct).toFixed(0)}% (${step.status})`);
-      if (terminalStatuses.includes(step.status)) {
-        break;
-      }
-      attempts += 1;
-      await sleep(2000);
-    }
-
-    if (!latest) {
-      throw new Error("Mathpix 동기화 응답을 받지 못했습니다.");
-    }
-    if (latest.status === "failed") {
-      throw new Error(latest.error_message || "Mathpix 처리에 실패했습니다.");
-    }
-    if (latest.status === "cancelled") {
-      throw new Error("Mathpix 작업이 취소되었습니다.");
-    }
-    if (latest.status !== "completed") {
-      throw new Error("Mathpix 동기화가 시간 내 완료되지 않았습니다. 다시 시도해주세요.");
-    }
-    return latest;
-  }, [patchJob]);
-
-  const runAction = useCallback(
-    async (
-      job: OcrJobListItem,
-      action: "pipeline" | "submit" | "sync" | "classify" | "materialize" | "delete",
-    ) => {
-      setNotice(null);
-      setError(null);
-      setRunningAction((prev) => ({ ...prev, [job.id]: action }));
-      try {
-        if (action === "pipeline") {
-          setNotice(`${job.original_filename}: AI 페이지 스캔 시작`);
-          const preprocessed = await preprocessOcrJobWithAi(job.id, {
-            max_pages: 500,
-            render_scale: 1.7,
-            temperature: 0,
-            max_parallel_pages: 2,
-            max_output_tokens: 8192,
-            thinking_budget: 1024,
-          });
-          setNotice(
-            `${job.original_filename}: AI 스캔 완료 (페이지 ${preprocessed.scanned_pages}, 문항 ${preprocessed.detected_problems}, 정답매칭 ${preprocessed.matched_answers})`,
-          );
-          const ocrResult = await runProblemOcrPipeline(job.id, {
-            curriculum_code: "CSAT_2027",
-            source_category: "other",
-            source_type: "workbook",
-            textbook_title: job.original_filename,
-            min_confidence: 0,
-            default_point_value: 3,
-            default_response_type: "short_answer",
-            default_answer_key: "PENDING_REVIEW",
-          });
-          setNotice(
-            `${job.original_filename}: 자동실행 완료 (문항OCR ${ocrResult.processed_candidates}, 적재 +${ocrResult.inserted_count}/${ocrResult.updated_count}, 스킵 ${ocrResult.skipped_count})`,
-          );
-        } else if (action === "submit") {
-          const submitResult = await submitMathpixJob(job.id, {});
-          patchJob(job.id, {
-            provider_job_id: submitResult.provider_job_id,
-            status: submitResult.status as ApiJobStatus,
-            progress_pct: submitResult.progress_pct,
-            started_at: submitResult.started_at ?? job.started_at,
-          });
-          setNotice(`${job.original_filename}: Mathpix 제출 완료, 자동 동기화 시작`);
-          const syncResult = await runSyncUntilCompleted(job);
-          setNotice(`${job.original_filename}: OCR 동기화 완료 (${toNumber(syncResult.progress_pct).toFixed(0)}%)`);
-        } else if (action === "sync") {
-          const syncResult = await runSyncUntilCompleted(job);
-          setNotice(
-            `${job.original_filename}: Mathpix 동기화 완료 (${syncResult.status}, ${toNumber(syncResult.progress_pct).toFixed(0)}%)`,
-          );
-        } else if (action === "classify") {
-          setNotice(`${job.original_filename}: AI 분류 시작`);
-          const latest = await runClassifyLoop(job);
-          setNotice(
-            `${job.original_filename}: AI 분류 완료 (${latest.provider}, ${latest.candidates_processed}/${latest.total_candidates})`,
-          );
-        } else if (action === "materialize") {
-          await materializeProblems(job.id, {
-            curriculum_code: "CSAT_2027",
-            min_confidence: 0,
-            default_point_value: 3,
-            default_response_type: "short_answer",
-            default_answer_key: "PENDING_REVIEW",
-          });
-          setNotice(`${job.original_filename}: 문제은행 적재 완료`);
-        } else {
-          const deleted = await deleteOcrJob(job.id, { delete_source: true });
-          setNotice(
-            deleted.source_deleted
-              ? `${job.original_filename}: 작업/원본 삭제 완료`
-              : `${job.original_filename}: 작업 삭제 완료 (원본 삭제는 건너뛰었거나 실패)`,
-          );
-        }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "작업 실행에 실패했습니다.");
-      } finally {
-        setRunningAction((prev) => {
-          const next = { ...prev };
-          delete next[job.id];
-          return next;
-        });
-        await loadJobs(searchText.trim(), statusFilter, { silent: true });
-      }
-    },
-    [loadJobs, patchJob, runClassifyLoop, runSyncUntilCompleted, searchText, statusFilter],
-  );
-
-  const actionMenuJob = useMemo(() => jobs.find((item) => item.id === actionMenuJobId) ?? null, [jobs, actionMenuJobId]);
-  const actionMenuBusy = actionMenuJob ? runningAction[actionMenuJob.id] : undefined;
-  const actionMenuSubmitSourceSupported = actionMenuJob ? isMathpixSubmitSourceSupported(actionMenuJob.storage_key) : false;
-  const actionMenuSubmitDisabled =
-    !actionMenuJob || Boolean(actionMenuBusy) || !!actionMenuJob.provider_job_id || !actionMenuSubmitSourceSupported;
-  const actionMenuSyncDisabled = !actionMenuJob || Boolean(actionMenuBusy) || !actionMenuJob.provider_job_id;
-  const actionMenuClassifyDisabled = !actionMenuJob || Boolean(actionMenuBusy);
-  const actionMenuMaterializeDisabled = !actionMenuJob || Boolean(actionMenuBusy);
-  const actionMenuDeleteDisabled = !actionMenuJob || Boolean(actionMenuBusy);
-
-  const runActionFromMenu = useCallback(
-    (action: "submit" | "sync" | "classify" | "materialize" | "delete") => {
-      if (!actionMenuJob) return;
-      const targetJob = actionMenuJob;
-      closeActionMenu();
-      if (action === "delete") {
-        const ok = window.confirm("이 작업을 삭제할까요?\n(참조가 없으면 원본 S3 파일도 함께 삭제 시도됩니다.)");
-        if (!ok) return;
-      }
-      void runAction(targetJob, action);
-    },
-    [actionMenuJob, closeActionMenu, runAction],
-  );
-
-  const openPreview = useCallback(async (job: OcrJobListItem) => {
-    setPreviewOpen(true);
-    setPreviewTitle(job.original_filename);
-    setPreviewQuestions([]);
-    setPreviewSelectedIndex(0);
-    setPreviewError(null);
-    setPreviewLoading(true);
-    try {
-      try {
-        const res = await listOcrJobQuestions(job.id, { limit: 1000, offset: 0 });
-        setPreviewQuestions(res.items);
-        if (res.items.length === 0) {
-          setPreviewError("문항 단위 미리보기가 없습니다. OCR 동기화를 먼저 실행하세요.");
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : "";
-        const isQuestionsApiUnavailable =
-          message.includes("404") || message.toLowerCase().includes("not found");
-        if (!isQuestionsApiUnavailable) {
-          throw err;
-        }
-        const pageRes = await listOcrJobPages(job.id, { limit: 50, offset: 0 });
-        const fallbackItems = toQuestionPreviewItemsFromPages(pageRes.items);
-        setPreviewQuestions(fallbackItems);
-        if (fallbackItems.length === 0) {
-          setPreviewError("문항 단위 미리보기가 없습니다. OCR 동기화를 먼저 실행하세요.");
-        } else {
-          setNotice(`${job.original_filename}: 구버전 API 감지, 페이지 기반 문항 분할로 미리보기를 표시했습니다.`);
-        }
-      }
-    } catch (err) {
-      setPreviewError(err instanceof Error ? err.message : "문항 미리보기를 불러오지 못했습니다.");
-    } finally {
-      setPreviewLoading(false);
-    }
+      return { ...prev, [jobId]: action };
+    });
   }, []);
 
-  const visibleStatuses = useMemo(
-    () => ["completed", "processing", "uploading", "queued", "failed", "cancelled"] as ApiJobStatus[],
+  const handleRunWorkflow = useCallback(
+    async (job: OcrJobListItem) => {
+      setError(null);
+      setNotice(null);
+      setRowAction(job.id, "워크플로우 실행 중");
+      try {
+        const result = await runOcrWorkflow(job.id, {});
+        setNotice(
+          `완료: 문항 ${result.processed_candidates}건 처리 · 삽입 ${result.inserted_count}건 · 업데이트 ${result.updated_count}건 · 그래프/자산 저장 ${result.stored_visual_assets}건`,
+        );
+        await loadJobs(searchText, statusFilter, { silent: true });
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "워크플로우 실행에 실패했습니다.");
+      } finally {
+        setRowAction(job.id, null);
+      }
+    },
+    [loadJobs, searchText, setRowAction, statusFilter],
+  );
+
+  const handlePreview = useCallback(
+    async (job: OcrJobListItem) => {
+      setPreviewOpen(true);
+      setPreviewTitle(job.original_filename);
+      setPreviewQuestions([]);
+      setPreviewSelectedIndex(0);
+      setPreviewError(null);
+      setPreviewLoading(true);
+      try {
+        let questions: OcrQuestionPreviewItem[] = [];
+        try {
+          const questionRes = await listOcrJobQuestions(job.id, { limit: 500, offset: 0 });
+          questions = questionRes.items;
+        } catch (err) {
+          if (!(err instanceof Error) || !err.message.includes("404")) {
+            throw err;
+          }
+        }
+
+        if (questions.length === 0) {
+          const pagesRes = await listOcrJobPages(job.id, { limit: 500, offset: 0 });
+          questions = toQuestionPreviewItemsFromPages(pagesRes.items);
+        }
+
+        setPreviewQuestions(questions);
+        if (questions.length === 0) {
+          setPreviewError("미리볼 문항이 없습니다. 워크플로우를 실행한 뒤 다시 시도하세요.");
+        }
+      } catch (err) {
+        setPreviewError(err instanceof Error ? err.message : "미리보기를 불러오지 못했습니다.");
+      } finally {
+        setPreviewLoading(false);
+      }
+    },
     [],
   );
-  const selectedPreviewQuestion = previewQuestions[previewSelectedIndex] ?? null;
 
-  useEffect(() => {
-    if (previewQuestions.length === 0) {
-      setPreviewSelectedIndex(0);
-      return;
-    }
-    if (previewSelectedIndex >= previewQuestions.length) {
-      setPreviewSelectedIndex(previewQuestions.length - 1);
-    }
-  }, [previewQuestions, previewSelectedIndex]);
+  const handleDelete = useCallback(
+    async (job: OcrJobListItem) => {
+      const ok = window.confirm(`작업을 삭제할까요?\n${job.original_filename}`);
+      if (!ok) return;
+
+      setError(null);
+      setNotice(null);
+      setRowAction(job.id, "삭제 중");
+      try {
+        const deleted = await deleteOcrJob(job.id, { delete_source: true });
+        setNotice(deleted.source_deleted ? "작업과 원본 파일을 삭제했습니다." : "작업을 삭제했습니다.");
+        await loadJobs(searchText, statusFilter, { silent: true });
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "작업 삭제에 실패했습니다.");
+      } finally {
+        setRowAction(job.id, null);
+      }
+    },
+    [loadJobs, searchText, setRowAction, statusFilter],
+  );
+
+  const selectedQuestion = previewQuestions[previewSelectedIndex] ?? null;
 
   return (
     <Box>
-      <Box sx={{ mb: 4 }}>
-        <Typography variant="h4" sx={{ fontWeight: 700, color: "#FFFFFF" }}>
-          작업 목록
-        </Typography>
-        <Typography variant="body2" sx={{ color: "#919497", mt: 0.5 }}>
-          실제 API 연동 상태 관리 (자동실행/제출/동기화/AI 분류/문제 적재)
-        </Typography>
+      <Box sx={{ mb: 3.5, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 2 }}>
+        <Box>
+          <Typography variant="h4" sx={{ fontWeight: 700, color: "#FFFFFF" }}>
+            작업 목록
+          </Typography>
+          <Typography variant="body2" sx={{ color: "#919497", mt: 0.5 }}>
+            단일 워크플로우: Mathpix 전체 OCR → AI 분류 → 문제/그래프 크롭 저장
+          </Typography>
+        </Box>
+        <Button
+          variant="outlined"
+          size="small"
+          startIcon={<RefreshRoundedIcon />}
+          onClick={() => void handleRefresh()}
+          sx={{
+            borderColor: "rgba(231,227,227,0.2)",
+            color: "#E7E3E3",
+            "&:hover": { borderColor: "#E7E3E3" },
+          }}
+        >
+          새로고침
+        </Button>
       </Box>
 
       {error && (
@@ -577,124 +382,92 @@ export default function JobsPage() {
         </Alert>
       )}
 
-      <Box sx={{ mb: 3, display: "flex", gap: 1.5, alignItems: "center", flexWrap: "wrap" }}>
-        <TextField
-          size="small"
-          placeholder="파일명/스토리지키 검색..."
-          value={searchText}
-          onChange={(e) => setSearchText(e.target.value)}
-          slotProps={{
-            input: {
+      <Card sx={{ mb: 2 }}>
+        <CardContent sx={{ display: "grid", gridTemplateColumns: "1fr 200px", gap: 1.5 }}>
+          <TextField
+            size="small"
+            placeholder="파일명/키워드 검색"
+            value={searchText}
+            onChange={(e) => setSearchText(e.target.value)}
+            InputProps={{
               startAdornment: (
                 <InputAdornment position="start">
-                  <SearchRoundedIcon sx={{ fontSize: 18, color: "#919497" }} />
+                  <SearchRoundedIcon sx={{ fontSize: 18 }} />
                 </InputAdornment>
               ),
-            },
-          }}
-          sx={{
-            width: 320,
-            "& .MuiOutlinedInput-root": {
-              backgroundColor: "#141414",
-              fontSize: 13,
-              "& fieldset": { borderColor: "rgba(231,227,227,0.08)" },
-              "&:hover fieldset": { borderColor: "rgba(231,227,227,0.15)" },
-              "&.Mui-focused fieldset": { borderColor: "#E7E3E3" },
-            },
-            "& input": { color: "#FFFFFF" },
-          }}
-        />
-        <Chip
-          label="전체"
-          size="small"
-          onClick={() => setStatusFilter("all")}
-          variant={statusFilter === "all" ? "filled" : "outlined"}
-          sx={{
-            borderColor: "rgba(231,227,227,0.12)",
-            color: statusFilter === "all" ? "#FFFFFF" : "#919497",
-            backgroundColor: statusFilter === "all" ? "rgba(255,255,255,0.08)" : "transparent",
-            fontSize: 12,
-          }}
-        />
-        {visibleStatuses.map((s) => (
-          <Chip
-            key={s}
-            label={statusConfig[s].label}
-            size="small"
-            onClick={() => setStatusFilter(s)}
-            variant={statusFilter === s ? "filled" : "outlined"}
-            sx={{
-              borderColor: "rgba(231,227,227,0.12)",
-              color: statusFilter === s ? statusConfig[s].color : "#919497",
-              backgroundColor: statusFilter === s ? statusConfig[s].bg : "transparent",
-              fontSize: 12,
             }}
           />
-        ))}
-        <IconButton size="small" sx={{ color: "#919497" }} onClick={() => void loadJobs(searchText.trim(), statusFilter)}>
-          <RefreshRoundedIcon fontSize="small" />
-        </IconButton>
-        <Typography variant="caption" sx={{ color: "#919497" }}>
-          총 {total.toLocaleString()}건
-        </Typography>
-      </Box>
+          <TextField
+            select
+            size="small"
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as FilterStatus)}
+          >
+            <MenuItem value="all">전체 상태</MenuItem>
+            <MenuItem value="queued">대기</MenuItem>
+            <MenuItem value="uploading">업로드</MenuItem>
+            <MenuItem value="processing">진행중</MenuItem>
+            <MenuItem value="completed">완료</MenuItem>
+            <MenuItem value="failed">실패</MenuItem>
+            <MenuItem value="cancelled">취소</MenuItem>
+          </TextField>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardContent sx={{ p: 0 }}>
+          <Box sx={{ px: 3, py: 2, borderBottom: "1px solid rgba(231,227,227,0.06)", display: "flex", justifyContent: "space-between" }}>
+            <Typography variant="subtitle2" sx={{ color: "#FFFFFF", fontWeight: 600 }}>
+              작업 {total.toLocaleString()}건
+            </Typography>
+            {hasRunningJobs && (
+              <Typography variant="caption" sx={{ color: "#919497" }}>
+                실행 중 작업 자동 새로고침 중
+              </Typography>
+            )}
+          </Box>
           <TableContainer>
-            <Table>
+            <Table size="small">
               <TableHead>
                 <TableRow>
                   <TableCell>파일명</TableCell>
                   <TableCell>상태</TableCell>
                   <TableCell>진행률</TableCell>
-                  <TableCell>소요시간</TableCell>
-                  <TableCell>생성일시</TableCell>
-                  <TableCell align="right">작업</TableCell>
+                  <TableCell>페이지</TableCell>
+                  <TableCell>AI</TableCell>
+                  <TableCell>요청시각</TableCell>
+                  <TableCell align="right">액션</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
                 {jobs.map((job) => {
-                  const status = statusConfig[job.status];
-                  const busy = runningAction[job.id];
-                  const submitSourceSupported = isMathpixSubmitSourceSupported(job.storage_key);
-                  const pipelineDisabled = Boolean(busy) || !submitSourceSupported;
-                  const aiTotal = job.ai_total_candidates ?? 0;
-                  const aiProcessed = job.ai_candidates_processed ?? 0;
-                  const aiAccepted = job.ai_candidates_accepted ?? 0;
-                  const hasAiProgress =
-                    job.ai_done !== null ||
-                    job.ai_total_candidates !== null ||
-                    job.ai_candidates_processed !== null;
-                  const pipelineTooltip = busy
-                    ? "실행 중"
-                    : !submitSourceSupported
-                      ? "legacy storage_key(upload://)는 자동실행을 시작할 수 없습니다. 새로 업로드 후 시도하세요."
-                      : "전체 자동 실행 (AI 스캔→문항 분할/정답매칭→문제별 OCR→문제 적재)";
+                  const statusInfo = statusConfig[job.status];
+                  const running = runningAction[job.id];
                   return (
                     <TableRow key={job.id} sx={{ "&:hover": { backgroundColor: "rgba(255,255,255,0.02)" } }}>
                       <TableCell>
-                        <Typography variant="body2" sx={{ color: "#FFFFFF", fontWeight: 500, fontSize: 13 }}>
+                        <Typography sx={{ color: "#FFFFFF", fontSize: 13, fontWeight: 500 }}>
                           {job.original_filename}
                         </Typography>
-                        <Typography variant="caption" sx={{ color: "#52525B" }}>
-                          {job.id}
-                        </Typography>
+                        {running && (
+                          <Typography variant="caption" sx={{ color: "#919497" }}>
+                            {running}
+                          </Typography>
+                        )}
                       </TableCell>
                       <TableCell>
                         <Chip
-                          label={status.label}
+                          label={statusInfo.label}
                           size="small"
                           sx={{
-                            color: status.color,
-                            backgroundColor: status.bg,
-                            fontWeight: 500,
+                            color: statusInfo.color,
+                            backgroundColor: statusInfo.bg,
                             fontSize: 11,
                             height: 22,
                           }}
                         />
                       </TableCell>
-                      <TableCell sx={{ minWidth: 140 }}>
+                      <TableCell sx={{ minWidth: 120 }}>
                         <LinearProgress
                           variant="determinate"
                           value={toNumber(job.progress_pct)}
@@ -706,74 +479,70 @@ export default function JobsPage() {
                           }}
                         />
                         <Typography variant="caption" sx={{ color: "#919497" }}>
-                          {job.processed_pages}/{job.total_pages || 0} 페이지 ({toNumber(job.progress_pct).toFixed(0)}%)
-                        </Typography>
-                        {hasAiProgress && (
-                          <Typography variant="caption" sx={{ color: "#7FB3FF", display: "block", mt: 0.25 }}>
-                            AI {aiProcessed}/{aiTotal}
-                            {job.ai_done ? " 완료" : " 진행중"}
-                            {` · 승인 ${aiAccepted}`}
-                            {job.ai_provider ? ` · ${job.ai_provider}` : ""}
-                          </Typography>
-                        )}
-                      </TableCell>
-                      <TableCell>
-                        <Typography variant="body2" sx={{ color: "#919497", fontSize: 13 }}>
-                          {formatDuration(job.started_at, job.finished_at)}
+                          {job.progress_pct}%
                         </Typography>
                       </TableCell>
                       <TableCell>
-                        <Typography variant="body2" sx={{ color: "#919497", fontSize: 13 }}>
+                        <Typography variant="body2" sx={{ fontSize: 12 }}>
+                          {job.processed_pages}/{job.total_pages || 0}
+                        </Typography>
+                      </TableCell>
+                      <TableCell>
+                        <Typography variant="body2" sx={{ fontSize: 12 }}>
+                          {job.ai_candidates_processed ?? 0}/{job.ai_total_candidates ?? 0}
+                        </Typography>
+                      </TableCell>
+                      <TableCell>
+                        <Typography variant="body2" sx={{ fontSize: 12 }}>
                           {formatDate(job.requested_at)}
                         </Typography>
                       </TableCell>
                       <TableCell align="right">
-                        <Box sx={{ display: "flex", justifyContent: "flex-end", gap: 0.5 }}>
-                          <Tooltip title={pipelineTooltip}>
-                            <span>
-                              <IconButton
-                                size="small"
-                                sx={{ color: "#D4A574" }}
-                                disabled={pipelineDisabled}
-                                onClick={() => void runAction(job, "pipeline")}
-                              >
-                                <AutoAwesomeRoundedIcon sx={{ fontSize: 16 }} />
-                              </IconButton>
-                            </span>
-                          </Tooltip>
-                          <Tooltip title={busy ? "실행 중" : "문항 미리보기"}>
-                            <span>
-                              <IconButton
-                                size="small"
-                                sx={{ color: "#919497" }}
-                                disabled={Boolean(busy)}
-                                onClick={() => void openPreview(job)}
-                              >
-                                <VisibilityRoundedIcon sx={{ fontSize: 16 }} />
-                              </IconButton>
-                            </span>
-                          </Tooltip>
-                          <Tooltip title={busy ? "실행 중" : "상세 작업"}>
-                            <span>
-                              <IconButton
-                                size="small"
-                                sx={{ color: "#919497" }}
-                                disabled={Boolean(busy)}
-                                onClick={(event) => openActionMenu(event, job)}
-                              >
-                                <MoreHorizRoundedIcon sx={{ fontSize: 16 }} />
-                              </IconButton>
-                            </span>
-                          </Tooltip>
-                        </Box>
+                        <Stack direction="row" spacing={0.75} justifyContent="flex-end">
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            startIcon={<PlayArrowRoundedIcon />}
+                            disabled={Boolean(running)}
+                            onClick={() => void handleRunWorkflow(job)}
+                            sx={{
+                              borderColor: "rgba(119,140,134,0.4)",
+                              color: "#778C86",
+                              "&:hover": { borderColor: "#778C86", backgroundColor: "rgba(119,140,134,0.12)" },
+                            }}
+                          >
+                            실행
+                          </Button>
+                          <Button
+                            size="small"
+                            variant="text"
+                            startIcon={<VisibilityRoundedIcon />}
+                            disabled={Boolean(running)}
+                            onClick={() => void handlePreview(job)}
+                            sx={{ color: "#919497" }}
+                          >
+                            미리보기
+                          </Button>
+                          <Button
+                            size="small"
+                            variant="text"
+                            startIcon={<DeleteOutlineRoundedIcon />}
+                            disabled={Boolean(running)}
+                            onClick={() => void handleDelete(job)}
+                            sx={{ color: "#C45C5C" }}
+                          >
+                            삭제
+                          </Button>
+                        </Stack>
                       </TableCell>
                     </TableRow>
                   );
                 })}
+
                 {!loading && jobs.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={6}>
-                      <Typography variant="body2" sx={{ color: "#919497", py: 2 }}>
+                    <TableCell colSpan={7}>
+                      <Typography variant="body2" sx={{ py: 3, color: "#919497" }}>
                         조건에 맞는 작업이 없습니다.
                       </Typography>
                     </TableCell>
@@ -785,251 +554,84 @@ export default function JobsPage() {
         </CardContent>
       </Card>
 
-      <Menu
-        anchorEl={actionMenuAnchorEl}
-        open={Boolean(actionMenuAnchorEl) && Boolean(actionMenuJob)}
-        onClose={closeActionMenu}
-      >
-        <MenuItem disabled={actionMenuSubmitDisabled} onClick={() => runActionFromMenu("submit")}>
-          Mathpix 제출 + 동기화
-        </MenuItem>
-        <MenuItem disabled={actionMenuSyncDisabled} onClick={() => runActionFromMenu("sync")}>
-          Mathpix 동기화
-        </MenuItem>
-        <MenuItem disabled={actionMenuClassifyDisabled} onClick={() => runActionFromMenu("classify")}>
-          AI 분류
-        </MenuItem>
-        <MenuItem disabled={actionMenuMaterializeDisabled} onClick={() => runActionFromMenu("materialize")}>
-          문제 적재
-        </MenuItem>
-        <MenuItem
-          disabled={actionMenuDeleteDisabled}
-          onClick={() => runActionFromMenu("delete")}
-          sx={{ color: "#C45C5C" }}
-        >
-          작업 삭제
-        </MenuItem>
-      </Menu>
-
-      <Dialog
-        open={previewOpen}
-        onClose={() => setPreviewOpen(false)}
-        fullWidth
-        maxWidth="xl"
-        scroll="paper"
-        slotProps={{
-          paper: {
-            sx: {
-              backgroundColor: "#121416",
-              minHeight: isMobilePreview ? "72vh" : "78vh",
-            },
-          },
-        }}
-      >
-        <DialogTitle sx={{ color: "#FFFFFF", borderBottom: "1px solid rgba(231,227,227,0.08)", py: 1.5 }}>
-          <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 1.5 }}>
-            <Box>
-              <Typography variant="subtitle1" sx={{ color: "#FFFFFF", fontWeight: 700 }}>
-                문항 미리보기 · {previewTitle}
-              </Typography>
-              <Typography variant="caption" sx={{ color: "#919497" }}>
-                번호 패턴 기반 분리 + AI 분류 결과 결합
+      <Dialog open={previewOpen} onClose={() => setPreviewOpen(false)} maxWidth="xl" fullWidth>
+        <DialogTitle>{previewTitle || "문항 미리보기"}</DialogTitle>
+        <DialogContent dividers sx={{ minHeight: 420, p: 0 }}>
+          {previewLoading && (
+            <Box sx={{ p: 3 }}>
+              <Typography variant="body2" sx={{ color: "#666" }}>
+                문항 미리보기를 불러오는 중입니다...
               </Typography>
             </Box>
-            {!previewLoading && !previewError && (
-              <Chip
-                size="small"
-                label={`${previewQuestions.length}문항`}
-                sx={{
-                  color: "#7FB3FF",
-                  backgroundColor: "rgba(127,179,255,0.14)",
-                  fontWeight: 600,
-                }}
-              />
-            )}
-          </Box>
-        </DialogTitle>
-        <DialogContent dividers sx={{ p: 0, borderColor: "rgba(231,227,227,0.08)" }}>
-          {previewLoading && <Typography sx={{ color: "#919497" }}>불러오는 중...</Typography>}
-          {!previewLoading && previewError && <Alert severity="warning">{previewError}</Alert>}
-          {!previewLoading && !previewError && (
-            <MathJaxContext config={mathJaxConfig}>
-              <Box
-                sx={{
-                  display: "grid",
-                  gridTemplateColumns: isMobilePreview ? "1fr" : "320px 1fr",
-                  minHeight: isMobilePreview ? "auto" : 560,
-                }}
-              >
-                <Box
-                  sx={{
-                    borderRight: isMobilePreview ? "none" : "1px solid rgba(231,227,227,0.08)",
-                    borderBottom: isMobilePreview ? "1px solid rgba(231,227,227,0.08)" : "none",
-                    maxHeight: isMobilePreview ? 220 : 560,
-                    overflowY: "auto",
-                    p: 1,
-                  }}
-                >
-                  {previewQuestions.map((question, index) => {
-                    const selected = index === previewSelectedIndex;
-                    const snippet = question.statement_text.replace(/\s+/g, " ").trim();
-                    return (
-                      <Button
-                        key={`${question.page_id}-${question.candidate_no}-${index}`}
-                        onClick={() => setPreviewSelectedIndex(index)}
-                        sx={{
-                          width: "100%",
-                          textAlign: "left",
-                          justifyContent: "flex-start",
-                          mb: 0.75,
-                          px: 1.25,
-                          py: 1,
-                          borderRadius: 1.5,
-                          border: "1px solid",
-                          borderColor: selected ? "rgba(127,179,255,0.55)" : "rgba(231,227,227,0.08)",
-                          backgroundColor: selected ? "rgba(127,179,255,0.12)" : "rgba(255,255,255,0.02)",
-                          color: selected ? "#FFFFFF" : "#D3D6D9",
-                          "&:hover": {
-                            borderColor: "rgba(127,179,255,0.65)",
-                            backgroundColor: "rgba(127,179,255,0.1)",
-                          },
-                        }}
-                      >
-                        <Box sx={{ width: "100%" }}>
-                          <Box
-                            sx={{
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "space-between",
-                              gap: 1,
-                              mb: 0.4,
-                            }}
-                          >
-                            <Typography variant="caption" sx={{ color: selected ? "#7FB3FF" : "#A7B5BF", fontWeight: 700 }}>
-                              {question.candidate_key}
-                            </Typography>
-                            {question.has_visual_asset && (
-                              <Chip
-                                size="small"
-                                label="시각요소"
-                                sx={{
-                                  height: 18,
-                                  fontSize: 10,
-                                  color: "#D4A574",
-                                  backgroundColor: "rgba(212,165,116,0.15)",
-                                }}
-                              />
-                            )}
-                          </Box>
-                          <Typography
-                            variant="body2"
-                            sx={{
-                              fontSize: 12,
-                              color: selected ? "#F2F4F6" : "#C1C5C9",
-                              lineHeight: 1.5,
-                              display: "-webkit-box",
-                              WebkitLineClamp: 2,
-                              WebkitBoxOrient: "vertical",
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
-                            }}
-                          >
-                            {snippet || "(본문 없음)"}
-                          </Typography>
-                        </Box>
-                      </Button>
-                    );
-                  })}
-                </Box>
-
-                <Box sx={{ p: { xs: 2, md: 3 }, overflowY: "auto" }}>
-                  {!selectedPreviewQuestion && (
-                    <Typography variant="body2" sx={{ color: "#919497" }}>
-                      선택된 문항이 없습니다.
+          )}
+          {!previewLoading && previewError && (
+            <Box sx={{ p: 3 }}>
+              <Alert severity="warning">{previewError}</Alert>
+            </Box>
+          )}
+          {!previewLoading && !previewError && previewQuestions.length > 0 && (
+            <Box sx={{ display: "grid", gridTemplateColumns: "300px 1fr", minHeight: 420 }}>
+              <Box sx={{ borderRight: "1px solid #eee", overflowY: "auto", maxHeight: 580 }}>
+                {previewQuestions.map((item, index) => (
+                  <Box
+                    key={`${item.page_id}-${item.candidate_index}-${index}`}
+                    onClick={() => setPreviewSelectedIndex(index)}
+                    sx={{
+                      p: 2,
+                      cursor: "pointer",
+                      borderBottom: "1px solid #f2f2f2",
+                      backgroundColor: index === previewSelectedIndex ? "rgba(0,0,0,0.04)" : "#fff",
+                      "&:hover": { backgroundColor: "rgba(0,0,0,0.02)" },
+                    }}
+                  >
+                    <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+                      P{item.page_no} · 문항 {item.candidate_no}
                     </Typography>
-                  )}
-                  {selectedPreviewQuestion && (
-                    <>
-                      <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.75, mb: 2 }}>
-                        <Chip
-                          size="small"
-                          label={`페이지 ${selectedPreviewQuestion.page_no}`}
-                          sx={{ color: "#E7E3E3", backgroundColor: "rgba(231,227,227,0.08)" }}
-                        />
-                        <Chip
-                          size="small"
-                          label={`문항 ${selectedPreviewQuestion.candidate_no}`}
-                          sx={{ color: "#E7E3E3", backgroundColor: "rgba(231,227,227,0.08)" }}
-                        />
-                        <Chip
-                          size="small"
-                          label={`분리: ${selectedPreviewQuestion.split_strategy}`}
-                          sx={{ color: "#A7B5BF", backgroundColor: "rgba(167,181,191,0.12)" }}
-                        />
-                        {selectedPreviewQuestion.confidence !== null && (
-                          <Chip
-                            size="small"
-                            label={`신뢰도 ${Number(selectedPreviewQuestion.confidence).toFixed(0)}`}
-                            sx={{ color: "#7FB3FF", backgroundColor: "rgba(127,179,255,0.14)" }}
-                          />
-                        )}
-                        {selectedPreviewQuestion.provider && (
-                          <Chip
-                            size="small"
-                            label={`AI ${selectedPreviewQuestion.provider}`}
-                            sx={{ color: "#7FB3FF", backgroundColor: "rgba(127,179,255,0.14)" }}
-                          />
-                        )}
-                        {selectedPreviewQuestion.asset_types.map((assetType) => (
-                          <Chip
-                            key={`${selectedPreviewQuestion.candidate_key}-${assetType}`}
-                            size="small"
-                            label={assetType}
-                            sx={{ color: "#D4A574", backgroundColor: "rgba(212,165,116,0.14)" }}
-                          />
-                        ))}
-                      </Box>
-
-                      {selectedPreviewQuestion.has_visual_asset && selectedPreviewQuestion.asset_previews.length > 0 && (
-                        <Alert severity="info" sx={{ mb: 2 }}>
-                          그림/그래프/표가 문항과 함께 렌더링됩니다. 누락이 있으면 재동기화 후 재확인하세요.
-                        </Alert>
-                      )}
-                      {selectedPreviewQuestion.has_visual_asset && selectedPreviewQuestion.asset_previews.length === 0 && (
-                        <Alert severity="warning" sx={{ mb: 2 }}>
-                          시각 요소는 감지됐지만 추출 이미지가 없습니다. `문제 적재`를 다시 실행하면 자산을 재생성합니다.
-                        </Alert>
-                      )}
-
-                      <Box
-                        sx={{
-                          p: { xs: 2, md: 3 },
-                          border: "1px solid rgba(231,227,227,0.1)",
-                          borderRadius: 2,
-                          background:
-                            "linear-gradient(180deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.015) 100%)",
-                          minHeight: 360,
-                        }}
-                      >
-                        <ProblemStatementView
-                          text={selectedPreviewQuestion.statement_text}
-                          assets={selectedPreviewQuestion.asset_previews}
-                        />
-                      </Box>
-                    </>
-                  )}
-                </Box>
+                    <Typography variant="caption" sx={{ color: "#666" }}>
+                      {item.split_strategy}
+                    </Typography>
+                    <Typography variant="body2" sx={{ mt: 1, color: "#444" }}>
+                      {item.statement_text.slice(0, 90)}
+                      {item.statement_text.length > 90 ? "..." : ""}
+                    </Typography>
+                    <Stack direction="row" spacing={0.5} sx={{ mt: 1, flexWrap: "wrap" }}>
+                      {item.asset_types.map((assetType) => (
+                        <Chip key={assetType} size="small" label={assetType} />
+                      ))}
+                    </Stack>
+                  </Box>
+                ))}
               </Box>
-            </MathJaxContext>
+              <Box sx={{ p: 3, overflowY: "auto", maxHeight: 580 }}>
+                {selectedQuestion && (
+                  <>
+                    <Typography variant="h6" sx={{ mb: 1.5 }}>
+                      P{selectedQuestion.page_no} · 문항 {selectedQuestion.candidate_no}
+                    </Typography>
+                    <Typography variant="caption" sx={{ color: "#666", display: "block", mb: 2 }}>
+                      전략: {selectedQuestion.split_strategy}
+                    </Typography>
+                    <MathJaxContext config={mathJaxConfig}>
+                      <ProblemStatementView
+                        text={selectedQuestion.statement_text}
+                        assets={selectedQuestion.asset_previews.map((asset, idx) => ({
+                          id: `${selectedQuestion.external_problem_key}-${idx}`,
+                          asset_type: asset.asset_type,
+                          storage_key: asset.storage_key,
+                          preview_url: asset.preview_url,
+                          page_no: asset.page_no,
+                          bbox: asset.bbox,
+                        }))}
+                      />
+                    </MathJaxContext>
+                  </>
+                )}
+              </Box>
+            </Box>
           )}
         </DialogContent>
-        <DialogActions sx={{ borderTop: "1px solid rgba(231,227,227,0.08)", justifyContent: "space-between", px: 2 }}>
-          <Typography variant="caption" sx={{ color: "#6D7880" }}>
-            문항 경계는 번호 패턴 우선, AI 분류 결과가 있으면 해당 분할을 우선합니다.
-          </Typography>
-          <Button onClick={() => setPreviewOpen(false)} sx={{ color: "#E7E3E3" }}>
-            닫기
-          </Button>
+        <DialogActions>
+          <Button onClick={() => setPreviewOpen(false)}>닫기</Button>
         </DialogActions>
       </Dialog>
     </Box>

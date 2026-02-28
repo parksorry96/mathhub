@@ -113,7 +113,7 @@ export default function UploadPage() {
             jobId: created.id,
           });
           setNotice(
-            "S3 업로드 및 작업 등록이 완료되었습니다. 작업 목록에서 Mathpix 제출/동기화를 실행하세요.",
+            "S3 업로드 및 작업 등록이 완료되었습니다. 작업 목록에서 워크플로우 실행 버튼을 누르세요.",
           );
         } catch (err) {
           updateFile(id, {

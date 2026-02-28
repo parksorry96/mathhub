@@ -145,69 +145,26 @@ class OCRJobListResponse(BaseModel):
     status_counts: dict[str, int]
 
 
-class OCRJobAIClassifyRequest(BaseModel):
-    api_key: str | None = None
-    api_base_url: str | None = None
-    model: str | None = None
-    max_pages: int = Field(default=20, ge=1, le=1000)
-    min_confidence: Decimal = Field(default=0, ge=0, le=100)
-    max_candidates_per_call: int = Field(default=5, ge=1, le=50)
-
-
-class AICandidateClassification(BaseModel):
-    candidate_no: int
-    statement_text: str
-    split_strategy: str | None = None
-    bbox: dict | None = None
-    layout_column: int | None = None
-    layout_mode: str | None = None
-    subject_code: str | None
-    unit_code: str | None
-    point_value: int | None
-    source_category: str | None
-    source_type: str | None
-    validation_status: str
-    confidence: Decimal
-    reason: str | None
-    provider: str
-    model: str
-
-
-class AIPageClassification(BaseModel):
-    page_id: UUID
+class MaterializedProblemResult(BaseModel):
     page_no: int
-    candidate_count: int
-    candidates: list[AICandidateClassification]
+    candidate_no: int
+    status: str
+    problem_id: UUID | None
+    external_problem_key: str
+    reason: str | None
 
 
-class OCRJobAIClassifyResponse(BaseModel):
-    job_id: UUID
-    provider: str
-    model: str
-    pages_processed: int
-    candidates_processed: int
-    candidates_accepted: int
-    page_results: list[AIPageClassification]
+class OCRJobWorkflowRunRequest(BaseModel):
+    app_id: str | None = None
+    app_key: str | None = None
+    base_url: str | None = None
+    include_diagram_text: bool = True
+    max_mathpix_polls: int = Field(default=120, ge=1, le=720)
+    poll_interval_sec: Decimal = Field(default=2, ge=1, le=30)
 
-
-class OCRJobAIClassifyStepResponse(BaseModel):
-    job_id: UUID
-    done: bool
-    processed_in_call: int
-    total_candidates: int
-    candidates_processed: int
-    candidates_accepted: int
-    provider: str
-    model: str
-    current_page_no: int | None = None
-    current_candidate_no: int | None = None
-    current_candidate_provider: str | None = None
-
-
-class OCRJobAIPreprocessRequest(BaseModel):
-    api_key: str | None = None
-    api_base_url: str | None = None
-    model: str | None = None
+    gemini_api_key: str | None = None
+    gemini_base_url: str | None = None
+    gemini_model: str | None = None
     max_pages: int = Field(default=500, ge=1, le=1000)
     render_scale: Decimal = Field(default=1.35, ge=1, le=3)
     temperature: Decimal = Field(default=0.1, ge=0, le=1)
@@ -215,62 +172,6 @@ class OCRJobAIPreprocessRequest(BaseModel):
     max_output_tokens: int = Field(default=2048, ge=256, le=8192)
     thinking_budget: int | None = Field(default=0, ge=0, le=24576)
 
-
-class OCRJobAIPreprocessPageSummary(BaseModel):
-    page_no: int
-    page_type: str
-    problem_count: int
-    answer_count: int
-
-
-class OCRJobAIPreprocessResponse(BaseModel):
-    job_id: UUID
-    provider: str
-    model: str
-    scanned_pages: int
-    detected_problems: int
-    detected_answers: int
-    matched_answers: int
-    pages: list[OCRJobAIPreprocessPageSummary]
-
-
-class OCRJobMathpixSubmitRequest(BaseModel):
-    file_url: str | None = None
-    callback_url: str | None = None
-    app_id: str | None = None
-    app_key: str | None = None
-    base_url: str | None = None
-    include_diagram_text: bool = True
-
-
-class OCRJobMathpixSubmitResponse(BaseModel):
-    job_id: UUID
-    provider_job_id: str
-    status: str
-    progress_pct: Decimal
-    requested_at: datetime
-    started_at: datetime | None
-
-
-class OCRJobMathpixSyncRequest(BaseModel):
-    app_id: str | None = None
-    app_key: str | None = None
-    base_url: str | None = None
-
-
-class OCRJobMathpixSyncResponse(BaseModel):
-    job_id: UUID
-    provider_job_id: str
-    status: str
-    progress_pct: Decimal
-    pages_upserted: int
-    error_message: str | None
-
-
-class OCRJobProblemOCRRequest(BaseModel):
-    app_id: str | None = None
-    app_key: str | None = None
-    base_url: str | None = None
     curriculum_code: str = Field(default="CSAT_2027", min_length=1)
     source_id: UUID | None = None
     source_category: str = Field(default="other", min_length=1)
@@ -284,41 +185,19 @@ class OCRJobProblemOCRRequest(BaseModel):
     save_problem_images: bool = True
 
 
-class OCRJobMaterializeProblemsRequest(BaseModel):
-    curriculum_code: str = Field(default="CSAT_2027", min_length=1)
-    source_id: UUID | None = None
-    min_confidence: Decimal = Field(default=0, ge=0, le=100)
-    default_point_value: int = Field(default=3, ge=2, le=4)
-    default_response_type: str = Field(default="short_answer", min_length=1)
-    default_answer_key: str = Field(default="PENDING_REVIEW", min_length=1)
-
-
-class MaterializedProblemResult(BaseModel):
-    page_no: int
-    candidate_no: int
-    status: str
-    problem_id: UUID | None
-    external_problem_key: str
-    reason: str | None
-
-
-class OCRJobProblemOCRResponse(BaseModel):
+class OCRJobWorkflowRunResponse(BaseModel):
     job_id: UUID
+    provider_job_id: str
+    status: str
+    progress_pct: Decimal
     provider: str
     model: str
+    pages_upserted: int
     processed_candidates: int
     inserted_count: int
     updated_count: int
     skipped_count: int
     matched_answers: int
-    results: list[MaterializedProblemResult]
-
-
-class OCRJobMaterializeProblemsResponse(BaseModel):
-    job_id: UUID
-    curriculum_code: str
-    source_id: UUID | None
-    inserted_count: int
-    updated_count: int
-    skipped_count: int
+    detected_visual_assets: int
+    stored_visual_assets: int
     results: list[MaterializedProblemResult]

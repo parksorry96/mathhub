@@ -93,82 +93,21 @@ export interface OcrJobQuestionsResponse {
   offset: number;
 }
 
-export interface OcrJobAiClassifyStepResponse {
-  job_id: string;
-  done: boolean;
-  processed_in_call: number;
-  total_candidates: number;
-  candidates_processed: number;
-  candidates_accepted: number;
-  provider: string;
-  model: string;
-  current_page_no: number | null;
-  current_candidate_no: number | null;
-  current_candidate_provider: string | null;
-}
-
-export interface OcrJobAIPreprocessPageSummary {
-  page_no: number;
-  page_type: string;
-  problem_count: number;
-  answer_count: number;
-}
-
-export interface OcrJobAIPreprocessResponse {
-  job_id: string;
-  provider: string;
-  model: string;
-  scanned_pages: number;
-  detected_problems: number;
-  detected_answers: number;
-  matched_answers: number;
-  pages: OcrJobAIPreprocessPageSummary[];
-}
-
-export interface OcrJobMathpixSubmitResponse {
+export interface OcrJobWorkflowRunResponse {
   job_id: string;
   provider_job_id: string;
   status: string;
   progress_pct: string;
-  requested_at: string;
-  started_at: string | null;
-}
-
-export interface OcrJobMathpixSyncResponse {
-  job_id: string;
-  provider_job_id: string;
-  status: ApiJobStatus;
-  progress_pct: string;
-  pages_upserted: number;
-  error_message: string | null;
-}
-
-export interface OcrJobMaterializeResponse {
-  job_id: string;
-  curriculum_code: string;
-  source_id: string | null;
-  inserted_count: number;
-  updated_count: number;
-  skipped_count: number;
-  results: Array<{
-    page_no: number;
-    candidate_no: number;
-    status: string;
-    problem_id: string | null;
-    external_problem_key: string;
-    reason: string | null;
-  }>;
-}
-
-export interface OcrJobProblemOcrResponse {
-  job_id: string;
   provider: string;
   model: string;
+  pages_upserted: number;
   processed_candidates: number;
   inserted_count: number;
   updated_count: number;
   skipped_count: number;
   matched_answers: number;
+  detected_visual_assets: number;
+  stored_visual_assets: number;
   results: Array<{
     page_no: number;
     candidate_no: number;
@@ -378,50 +317,8 @@ export async function uploadFileToS3PresignedUrl(params: {
   }
 }
 
-export function submitMathpixJob(jobId: string, payload?: Record<string, unknown>) {
-  return requestJson<OcrJobMathpixSubmitResponse>(`/ocr/jobs/${jobId}/mathpix/submit`, {
-    method: "POST",
-    body: JSON.stringify(payload ?? {}),
-  });
-}
-
-export function syncMathpixJob(jobId: string, payload?: Record<string, unknown>) {
-  return requestJson<OcrJobMathpixSyncResponse>(`/ocr/jobs/${jobId}/mathpix/sync`, {
-    method: "POST",
-    body: JSON.stringify(payload ?? {}),
-  });
-}
-
-export function classifyOcrJob(jobId: string, payload?: Record<string, unknown>) {
-  return requestJson(`/ocr/jobs/${jobId}/ai-classify`, {
-    method: "POST",
-    body: JSON.stringify(payload ?? {}),
-  });
-}
-
-export function classifyOcrJobStep(jobId: string, payload?: Record<string, unknown>) {
-  return requestJson<OcrJobAiClassifyStepResponse>(`/ocr/jobs/${jobId}/ai-classify/step`, {
-    method: "POST",
-    body: JSON.stringify(payload ?? {}),
-  });
-}
-
-export function preprocessOcrJobWithAi(jobId: string, payload?: Record<string, unknown>) {
-  return requestJson<OcrJobAIPreprocessResponse>(`/ocr/jobs/${jobId}/ai-preprocess`, {
-    method: "POST",
-    body: JSON.stringify(payload ?? {}),
-  });
-}
-
-export function runProblemOcrPipeline(jobId: string, payload?: Record<string, unknown>) {
-  return requestJson<OcrJobProblemOcrResponse>(`/ocr/jobs/${jobId}/problem-ocr`, {
-    method: "POST",
-    body: JSON.stringify(payload ?? {}),
-  });
-}
-
-export function materializeProblems(jobId: string, payload?: Record<string, unknown>) {
-  return requestJson<OcrJobMaterializeResponse>(`/ocr/jobs/${jobId}/materialize-problems`, {
+export function runOcrWorkflow(jobId: string, payload?: Record<string, unknown>) {
+  return requestJson<OcrJobWorkflowRunResponse>(`/ocr/jobs/${jobId}/workflow/run`, {
     method: "POST",
     body: JSON.stringify(payload ?? {}),
   });
