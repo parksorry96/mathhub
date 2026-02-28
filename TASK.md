@@ -328,3 +328,10 @@
 - [x] 문항 메타데이터(`metadata.visual_assets`)에 감지/저장 개수, 저장 키, 추출 오류 정보를 기록해 디버깅 가능성 강화
 - [x] bbox 좌표 정규화 로직 보강: ratio bbox(`x0_ratio...`)를 후보/자산 필터링 경로에서 안정적으로 해석하고 소스 페이지 치수 기반 변환 지원
 - [x] 회귀 테스트 추가/보정 (`test_ai_classifier_asset_hints.py`) 및 검증 수행 (`api ruff`, `api pytest`, `api compileall`)
+
+### 45. OCR 워크플로우 초기화 후 단일 실행 파이프라인 재구성 — `5338f01`
+- [x] 백엔드 단계형 엔드포인트(`mathpix/submit`, `mathpix/sync`, `ai-preprocess`, `ai-classify`, `problem-ocr`, `materialize-problems`)를 제거하고 `POST /ocr/jobs/{job_id}/workflow/run` 단일 실행 API로 교체
+- [x] 단일 API에서 `Mathpix 전체 PDF OCR → Gemini 문항/그래프 분류 → 문항 OCR + 그래프/자산 크롭 저장`을 일괄 수행하도록 통합
+- [x] 웹 작업목록을 단일 액션(`실행`) 중심 UI로 재작성하고 미리보기/삭제만 유지
+- [x] 웹 API 클라이언트를 `runOcrWorkflow` 중심으로 정리하고 구 워크플로우 호출 제거
+- [x] 검증 수행 (`api ruff`, `api pytest`, `api compileall`, `web lint`, `web build`)
