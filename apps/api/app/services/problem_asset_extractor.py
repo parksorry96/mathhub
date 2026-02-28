@@ -110,8 +110,18 @@ class ProblemAssetExtractor:
 
             hint_bbox = hint.get("bbox") if isinstance(hint.get("bbox"), dict) else None
             fallback_bbox = candidate_bbox if isinstance(candidate_bbox, dict) else None
+            if hint_bbox is None and asset_type in {"graph", "table", "image"}:
+                # For visual assets, avoid broad candidate-level fallback crops.
+                continue
+
             resolved_bbox = hint_bbox if hint_bbox is not None else fallback_bbox
             if not isinstance(resolved_bbox, dict):
+                continue
+            if _is_bbox_too_large_for_visual_asset(
+                page=self._doc[page_index],
+                bbox=resolved_bbox,
+                asset_type=asset_type,
+            ):
                 continue
             body, normalized_bbox = self.render_clip_png(
                 page_no=page_no,
@@ -386,3 +396,47 @@ def _to_positive_float(value: object) -> float | None:
     if parsed > 0:
         return parsed
     return None
+
+
+def _is_bbox_too_large_for_visual_asset(*, page, bbox: dict, asset_type: str) -> bool:
+    normalized = asset_type.strip().lower()
+    if normalized not in {"graph", "table", "image"}:
+        return False
+
+    page_rect = page.rect
+    page_w = float(page_rect.width)
+    page_h = float(page_rect.height)
+    projected = _project_bbox_to_page_space(bbox=bbox, page_w=page_w, page_h=page_h)
+    if projected is None:
+        return True
+    x0, y0, x1, y1 = projected
+    area = max(0.0, x1 - x0) * max(0.0, y1 - y0)
+    page_area = max(page_w * page_h, 1.0)
+    coverage = area / page_area
+    return coverage > 0.75
+
+
+def _project_bbox_to_page_space(*, bbox: dict, page_w: float, page_h: float) -> tuple[float, float, float, float] | None:
+    points = _to_xyxy(bbox)
+    if not points:
+        return None
+    x0, y0, x1, y1 = points
+    if x1 <= x0 or y1 <= y0:
+        return None
+
+    if 0 <= x0 <= 1 and 0 <= y0 <= 1 and 0 <= x1 <= 1 and 0 <= y1 <= 1:
+        return x0 * page_w, y0 * page_h, x1 * page_w, y1 * page_h
+
+    source_dimensions = _resolve_source_dimensions(bbox)
+    if source_dimensions:
+        source_w, source_h = source_dimensions
+        scale_x = page_w / source_w
+        scale_y = page_h / source_h
+        return x0 * scale_x, y0 * scale_y, x1 * scale_x, y1 * scale_y
+
+    if x1 > page_w * 1.8 or y1 > page_h * 1.8:
+        scale_x = page_w / max(x1, page_w)
+        scale_y = page_h / max(y1, page_h)
+        return x0 * scale_x, y0 * scale_y, x1 * scale_x, y1 * scale_y
+
+    return x0, y0, x1, y1

@@ -1,7 +1,11 @@
 from types import SimpleNamespace
 
 import app.services.problem_asset_extractor as extractor_module
-from app.services.problem_asset_extractor import _resolve_clip_rect, _select_asset_hints
+from app.services.problem_asset_extractor import (
+    _is_bbox_too_large_for_visual_asset,
+    _resolve_clip_rect,
+    _select_asset_hints,
+)
 
 
 class _DummyRect:
@@ -64,3 +68,12 @@ def test_resolve_clip_rect_uses_wider_padding_for_graph(monkeypatch):
     assert graph_rect[1] < image_rect[1]
     assert graph_rect[2] > image_rect[2]
     assert graph_rect[3] > image_rect[3]
+
+
+def test_is_bbox_too_large_for_visual_asset_detects_page_sized_bbox():
+    page = _DummyPage(width=1000.0, height=1000.0)
+    huge_bbox = {"x0_ratio": 0.01, "y0_ratio": 0.01, "x1_ratio": 0.99, "y1_ratio": 0.99}
+    small_bbox = {"x0_ratio": 0.45, "y0_ratio": 0.45, "x1_ratio": 0.75, "y1_ratio": 0.78}
+
+    assert _is_bbox_too_large_for_visual_asset(page=page, bbox=huge_bbox, asset_type="graph") is True
+    assert _is_bbox_too_large_for_visual_asset(page=page, bbox=small_bbox, asset_type="graph") is False

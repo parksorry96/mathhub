@@ -70,8 +70,9 @@ const statusConfig: Record<ApiJobStatus, { label: string; color: string; bg: str
 
 const mathJaxConfig = {
   tex: {
-    inlineMath: [["\\(", "\\)"]],
-    displayMath: [["\\[", "\\]"]],
+    inlineMath: [["\\(", "\\)"], ["$", "$"]],
+    displayMath: [["\\[", "\\]"], ["$$", "$$"]],
+    processEscapes: true,
   },
 };
 

@@ -68,6 +68,29 @@ _GEMINI_RESPONSE_SCHEMA = {
                             "enum": ["image", "graph", "table", "other"],
                         },
                     },
+                    "visual_assets": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "asset_type": {
+                                    "type": "string",
+                                    "enum": ["image", "graph", "table", "other"],
+                                },
+                                "bbox": {
+                                    "type": "object",
+                                    "properties": {
+                                        "x0_ratio": {"type": "number"},
+                                        "y0_ratio": {"type": "number"},
+                                        "x1_ratio": {"type": "number"},
+                                        "y1_ratio": {"type": "number"},
+                                    },
+                                    "required": ["x0_ratio", "y0_ratio", "x1_ratio", "y1_ratio"],
+                                },
+                            },
+                            "required": ["asset_type", "bbox"],
+                        },
+                    },
                     "confidence": {"type": "number"},
                     "bbox": {
                         "type": "object",
@@ -369,8 +392,9 @@ def _scan_page_with_gemini_model(
         "2) extract problem candidates only when they are real question statements.\n"
         "3) for each problem, provide normalized bbox ratios x0_ratio,y0_ratio,x1_ratio,y1_ratio in [0,1].\n"
         "4) classify visual_asset_types per problem using image/graph/table/other, and set has_visual_asset.\n"
-        "5) if answer keys are visible (answer/explanation pages), extract answer_candidates as {question_no, answer_key}.\n"
-        "6) use subject_code only from MATH_I,MATH_II,PROB_STATS,CALCULUS,GEOMETRY when inferable.\n"
+        "5) when visual assets exist, output visual_assets with precise bbox per asset.\n"
+        "6) if answer keys are visible (answer/explanation pages), extract answer_candidates as {question_no, answer_key}.\n"
+        "7) use subject_code only from MATH_I,MATH_II,PROB_STATS,CALCULUS,GEOMETRY when inferable.\n"
         f"Current page number: {page_no}"
     )
     image_b64 = base64.b64encode(image_bytes).decode("ascii")
@@ -609,7 +633,12 @@ def _normalize_problem_item(item: object, *, fallback_index: int, model: str) ->
 
     problem_type = str(item.get("problem_type") or "").strip() or None
     answer_key = _normalize_answer_key(item.get("answer_key"))
+    visual_assets = _normalize_visual_assets(item.get("visual_assets"))
     visual_asset_types = _normalize_visual_asset_types(item.get("visual_asset_types"))
+    for visual in visual_assets:
+        asset_type = str(visual.get("asset_type") or "").strip().lower()
+        if asset_type and asset_type not in visual_asset_types:
+            visual_asset_types.append(asset_type)
     has_visual_asset = bool(item.get("has_visual_asset")) or bool(visual_asset_types)
     if has_visual_asset and not visual_asset_types:
         visual_asset_types = ["other"]
@@ -626,6 +655,7 @@ def _normalize_problem_item(item: object, *, fallback_index: int, model: str) ->
         "answer_key": answer_key,
         "has_visual_asset": has_visual_asset,
         "visual_asset_types": visual_asset_types,
+        "visual_assets": visual_assets,
         "confidence": confidence,
         "validation_status": "needs_review",
         "provider": "gemini",
@@ -728,6 +758,31 @@ def _normalize_visual_asset_types(value: object) -> list[str]:
             continue
         seen.add(asset_type)
         normalized.append(asset_type)
+    return normalized
+
+
+def _normalize_visual_assets(value: object) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+
+    normalized: list[dict] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        bbox = _normalize_bbox(item.get("bbox"))
+        if bbox is None:
+            continue
+
+        asset_type = str(item.get("asset_type") or "").strip().lower()
+        if asset_type not in {"image", "graph", "table", "other"}:
+            asset_type = "other"
+
+        normalized.append(
+            {
+                "asset_type": asset_type,
+                "bbox": bbox,
+            }
+        )
     return normalized
 
 

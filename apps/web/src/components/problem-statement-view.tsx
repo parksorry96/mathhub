@@ -23,11 +23,6 @@ interface ProblemStatementViewProps {
   assets?: ProblemStatementAssetViewItem[];
 }
 
-function normalizeMathOperators(text: string): string {
-  // Force TeX operator limits placement for inline \lim_{} cases from OCR.
-  return text.replace(/\\lim\s*_/g, "\\lim\\limits_");
-}
-
 function dedupeStrings(values: string[]): string[] {
   const seen = new Set<string>();
   const deduped: string[] = [];
@@ -87,6 +82,10 @@ function stripGraphArtifactLines(text: string, options: { hasVisualImages: boole
   if (!hasVisualImages) {
     return text;
   }
+  if (hasLatexSyntax(text)) {
+    // Do not mutate OCR text aggressively when TeX syntax exists.
+    return text;
+  }
 
   const lines = text.split(/\r?\n/);
   const artifactCount = lines.filter((line) => isGraphArtifactLine(line)).length;
@@ -102,6 +101,15 @@ function stripGraphArtifactLines(text: string, options: { hasVisualImages: boole
     .trim();
 }
 
+function hasLatexSyntax(text: string): boolean {
+  return (
+    /\\\(|\\\)|\\\[|\\\]/.test(text) ||
+    /\$[^$\n]+\$/.test(text) ||
+    /\$\$[\s\S]+?\$\$/.test(text) ||
+    /\\[a-zA-Z]+(?:\s*\{)?/.test(text)
+  );
+}
+
 export function ProblemStatementView({
   text,
   assets = [],
@@ -114,11 +122,9 @@ export function ProblemStatementView({
       .filter((url): url is string => typeof url === "string" && url.trim().length > 0),
   );
   const renderImageUrls = dedupeStrings([...inlineImageUrls, ...assetPreviewUrls]);
-  const cleanedText = normalizeMathOperators(
-    stripGraphArtifactLines(stripInlineImageSyntax(sourceText), {
-      hasVisualImages: renderImageUrls.length > 0,
-    }),
-  );
+  const cleanedText = stripGraphArtifactLines(stripInlineImageSyntax(sourceText), {
+    hasVisualImages: renderImageUrls.length > 0,
+  });
 
   return (
     <Box>

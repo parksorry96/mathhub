@@ -252,6 +252,10 @@ def collect_problem_asset_hints(
         _resolve_source_dimensions(page_raw_payload) if isinstance(page_raw_payload, dict) else None
     )
     candidate_visual_types = _extract_candidate_visual_asset_types(candidate_meta)
+    candidate_visual_hints = _extract_candidate_visual_asset_hints(
+        candidate_meta=candidate_meta,
+        candidate_bbox=resolved_candidate_bbox,
+    )
     if candidate_visual_types:
         hints.extend(
             [
@@ -264,6 +268,8 @@ def collect_problem_asset_hints(
                 for asset_type in candidate_visual_types
             ]
         )
+    if candidate_visual_hints:
+        hints.extend(candidate_visual_hints)
 
     statement_hints: list[dict] = []
     if normalized:
@@ -344,6 +350,38 @@ def _extract_candidate_visual_asset_types(candidate_meta: dict | None) -> list[s
     if not normalized and bool(candidate_meta.get("has_visual_asset")):
         normalized.append("other")
     return normalized
+
+
+def _extract_candidate_visual_asset_hints(
+    *,
+    candidate_meta: dict | None,
+    candidate_bbox: dict | None,
+) -> list[dict]:
+    if not isinstance(candidate_meta, dict):
+        return []
+    raw_assets = candidate_meta.get("visual_assets")
+    if not isinstance(raw_assets, list):
+        return []
+
+    hints: list[dict] = []
+    for item in raw_assets:
+        if not isinstance(item, dict):
+            continue
+        asset_type = str(item.get("asset_type") or "").strip().lower()
+        if asset_type not in {"image", "graph", "table", "other"}:
+            asset_type = "other"
+        bbox = item.get("bbox") if isinstance(item.get("bbox"), dict) else candidate_bbox
+        if not isinstance(bbox, dict):
+            continue
+        hints.append(
+            {
+                "asset_type": asset_type,
+                "source": "ai_candidate_visual_asset",
+                "bbox": bbox,
+                "evidence": ["visual_assets"],
+            }
+        )
+    return hints
 
 
 def _collect_payload_text_hints(payload: dict) -> list[dict]:

@@ -60,6 +60,26 @@ def test_collect_problem_asset_hints_uses_ai_candidate_visual_types():
     assert all(item.get("bbox") == candidate_bbox for item in ai_type_hints)
 
 
+def test_collect_problem_asset_hints_uses_ai_candidate_visual_asset_bboxes():
+    candidate_bbox = {"x1": 120, "y1": 180, "x2": 760, "y2": 940}
+    graph_bbox = {"x0_ratio": 0.42, "y0_ratio": 0.38, "x1_ratio": 0.81, "y1_ratio": 0.82}
+
+    hints = collect_problem_asset_hints(
+        "문항을 풀이하시오.",
+        {},
+        candidate_bbox=candidate_bbox,
+        candidate_meta={
+            "has_visual_asset": True,
+            "visual_assets": [{"asset_type": "graph", "bbox": graph_bbox}],
+        },
+    )
+
+    ai_bbox_hints = [item for item in hints if item.get("source") == "ai_candidate_visual_asset"]
+    assert ai_bbox_hints
+    assert ai_bbox_hints[0]["asset_type"] == "graph"
+    assert ai_bbox_hints[0]["bbox"] == graph_bbox
+
+
 def test_collect_problem_asset_hints_prefers_payload_bbox_over_statement_hint():
     payload = {
         "page_width": 1000,

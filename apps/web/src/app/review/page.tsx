@@ -27,8 +27,9 @@ function difficultyLabel(pointValue: number) {
 
 const mathJaxConfig = {
   tex: {
-    inlineMath: [["\\(", "\\)"]],
-    displayMath: [["\\[", "\\]"]],
+    inlineMath: [["\\(", "\\)"], ["$", "$"]],
+    displayMath: [["\\[", "\\]"], ["$$", "$$"]],
+    processEscapes: true,
   },
 };
 
