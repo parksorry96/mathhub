@@ -321,3 +321,10 @@
 - [x] `ProblemAssetExtractor`에서 그래프/표/이미지에 candidate fallback bbox 사용을 차단하고, 페이지의 75% 초과 bbox는 시각자산 crop에서 제외
 - [x] 회귀 테스트 추가: AI visual bbox 힌트 반영, Gemini visual asset 정규화, 시각 bbox 과대영역 차단
 - [x] 검증 수행 (`api ruff`, `api pytest`, `api compileall`, `web lint`, `web build`, `/health`)
+
+### 44. 교재 PDF 그래프/도표 분리 OCR 정밀도 개선 — `630978a`
+- [x] `problem-ocr` 경로에 시각자산 힌트 수집(`collect_problem_asset_hints`) 및 문항별 자산 crop 추출(`extract_and_upload`)을 직접 연동
+- [x] `problem_assets`에 `ai_problem_ocr_asset_extract`/`ai_problem_ocr_asset_hint` 소스로 그래프·표·이미지 자산을 upsert하고 재실행 시 이전 힌트/추출 자산 정리
+- [x] 문항 메타데이터(`metadata.visual_assets`)에 감지/저장 개수, 저장 키, 추출 오류 정보를 기록해 디버깅 가능성 강화
+- [x] bbox 좌표 정규화 로직 보강: ratio bbox(`x0_ratio...`)를 후보/자산 필터링 경로에서 안정적으로 해석하고 소스 페이지 치수 기반 변환 지원
+- [x] 회귀 테스트 추가/보정 (`test_ai_classifier_asset_hints.py`) 및 검증 수행 (`api ruff`, `api pytest`, `api compileall`)
